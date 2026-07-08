@@ -1,15 +1,13 @@
 'use client'
 
 import { useState, useCallback, useEffect, useMemo } from 'react'
-import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight } from 'lucide-react'
+import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight, ArrowLeft } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { toast } from 'sonner'
 import { Toaster } from '@/components/ui/sonner'
 
@@ -241,6 +239,17 @@ export default function Home() {
     setEpisodeServersError(new Set())
     setExpandedSeasons(new Set())
     setSelectedEpisode(null)
+    // Push URL state so the browser back button returns to search results.
+    const detailUrl = new URL(window.location.href)
+    detailUrl.searchParams.set('view', 'details')
+    detailUrl.searchParams.set('id', String(item.id))
+    detailUrl.searchParams.set('type', item.type)
+    detailUrl.searchParams.set('source', item.source)
+    detailUrl.searchParams.set('name', item.name)
+    detailUrl.searchParams.set('year', item.year)
+    detailUrl.searchParams.set('poster', item.poster)
+    window.history.pushState({ view: 'details', itemId: item.id }, '', detailUrl.toString())
+    window.scrollTo(0, 0)
     try {
       const url = new URL('/api/details', window.location.origin)
       url.searchParams.set('id', String(item.id))
@@ -271,15 +280,43 @@ export default function Home() {
   }, [])
 
   const closeDetails = useCallback(() => {
-    setSelected(null)
-    setDetails(null)
-    setDetailsError(null)
-    setCopied(false)
-    setEpisodeServers(new Map())
-    setEpisodeServersLoading(new Set())
-    setEpisodeServersError(new Set())
-    setExpandedSeasons(new Set())
-    setSelectedEpisode(null)
+    // Pop the URL state we pushed in openDetails so the browser back button
+    // history stays consistent. If there's no pushed state (e.g. user landed
+    // directly on a detail URL), just clear the local state.
+    if (window.history.state && window.history.state.view === 'details') {
+      window.history.back()
+    } else {
+      setSelected(null)
+      setDetails(null)
+      setDetailsError(null)
+      setCopied(false)
+      setEpisodeServers(new Map())
+      setEpisodeServersLoading(new Set())
+      setEpisodeServersError(new Set())
+      setExpandedSeasons(new Set())
+      setSelectedEpisode(null)
+    }
+  }, [])
+
+  // Listen for browser back/forward — when the URL no longer has
+  // view=details, clear the detail state so we return to the search page.
+  useEffect(() => {
+    const onPopState = () => {
+      const params = new URLSearchParams(window.location.search)
+      if (params.get('view') !== 'details') {
+        setSelected(null)
+        setDetails(null)
+        setDetailsError(null)
+        setCopied(false)
+        setEpisodeServers(new Map())
+        setEpisodeServersLoading(new Set())
+        setEpisodeServersError(new Set())
+        setExpandedSeasons(new Set())
+        setSelectedEpisode(null)
+      }
+    }
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
   }, [])
 
   // Toggle a season's expanded/collapsed state
@@ -376,7 +413,8 @@ export default function Home() {
         </div>
       </header>
 
-      {/* Search */}
+      {/* Search (hidden when viewing a detail page) */}
+      {!selected && (
       <section className="border-b border-zinc-800 bg-zinc-900/30">
         <div className="container mx-auto px-4 py-6">
           <form onSubmit={onSubmit} className="max-w-3xl mx-auto space-y-3">
@@ -427,8 +465,10 @@ export default function Home() {
           </form>
         </div>
       </section>
+      )}
 
-      {/* Results */}
+      {/* Results (hidden when viewing a detail page) */}
+      {!selected && (
       <main className="flex-1 container mx-auto px-4 py-6">
         {error && (
           <div className="max-w-3xl mx-auto mb-6 p-4 rounded-lg border border-red-900/50 bg-red-950/30 text-red-200 flex items-start gap-3">
@@ -485,8 +525,10 @@ export default function Home() {
           </div>
         )}
       </main>
+      )}
 
-      {/* Footer */}
+      {/* Footer (hidden when viewing a detail page) */}
+      {!selected && (
       <footer className="border-t border-zinc-800 bg-zinc-900/50 mt-auto">
         <div className="container mx-auto px-4 py-4 text-xs text-zinc-500 flex flex-col sm:flex-row items-center justify-between gap-2">
           <div>Personal-use scraper for cinemm.com. Data cached locally in SQLite.</div>
@@ -495,60 +537,67 @@ export default function Home() {
           </div>
         </div>
       </footer>
+      )}
 
-      {/* Details dialog */}
-      <Dialog open={!!selected} onOpenChange={(o) => !o && closeDetails()}>
-        <DialogContent className="max-w-4xl max-h-[90vh] bg-zinc-950 border-zinc-800 text-zinc-100 overflow-hidden flex flex-col">
-          <DialogHeader className="px-6 pt-6 pb-3 border-b border-zinc-800 shrink-0">
-            <DialogTitle className="text-xl flex items-center gap-2">
-              {selected?.name}
-              {selected?.year && <span className="text-zinc-500 text-base font-normal">({selected.year})</span>}
+      {/* Detail page (replaces search page when a post is selected) */}
+      {selected && (
+        <main className="flex-1 container mx-auto px-4 py-6 max-w-5xl">
+          {/* Back button + title */}
+          <div className="mb-4 flex items-center gap-3 flex-wrap">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={closeDetails}
+              className="bg-zinc-900 border-zinc-700 hover:bg-zinc-800 text-zinc-100"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              <span className="ml-2">Back to search</span>
+            </Button>
+            <h2 className="text-xl font-bold flex items-center gap-2 flex-wrap">
+              {selected.name}
+              {selected.year && <span className="text-zinc-500 text-base font-normal">({selected.year})</span>}
               <Badge variant="outline" className="ml-1 border-zinc-700 text-zinc-300 capitalize">
-                {selected?.type}
+                {selected.type}
               </Badge>
-            </DialogTitle>
-            <DialogDescription className="text-zinc-400">
-              Full post data from cinemm.com. Download as JSON or copy to clipboard.
-            </DialogDescription>
-          </DialogHeader>
+            </h2>
+          </div>
 
-          <ScrollArea className="flex-1 px-6 py-4">
-            {detailsLoading && (
-              <div className="space-y-3">
-                <Skeleton className="h-48 w-32 bg-zinc-800" />
-                <Skeleton className="h-4 w-3/4 bg-zinc-800" />
-                <Skeleton className="h-32 w-full bg-zinc-800" />
+          {/* Detail content */}
+          {detailsLoading && (
+            <div className="space-y-3">
+              <Skeleton className="h-48 w-32 bg-zinc-800" />
+              <Skeleton className="h-4 w-3/4 bg-zinc-800" />
+              <Skeleton className="h-32 w-full bg-zinc-800" />
+            </div>
+          )}
+
+          {detailsError && (
+            <div className="p-4 rounded-lg border border-red-900/50 bg-red-950/30 text-red-200 flex items-start gap-3">
+              <AlertTriangle className="w-5 h-5 mt-0.5 shrink-0" />
+              <div>
+                <div className="font-semibold">Failed to load details</div>
+                <div className="text-sm text-red-300/80 mt-1">{detailsError}</div>
               </div>
-            )}
+            </div>
+          )}
 
-            {detailsError && (
-              <div className="p-4 rounded-lg border border-red-900/50 bg-red-950/30 text-red-200 flex items-start gap-3">
-                <AlertTriangle className="w-5 h-5 mt-0.5 shrink-0" />
-                <div>
-                  <div className="font-semibold">Failed to load details</div>
-                  <div className="text-sm text-red-300/80 mt-1">{detailsError}</div>
-                </div>
-              </div>
-            )}
+          {!detailsLoading && !detailsError && details && (
+            <DetailsView
+              item={selected}
+              details={details}
+              episodeServers={episodeServers}
+              episodeServersLoading={episodeServersLoading}
+              episodeServersError={episodeServersError}
+              expandedSeasons={expandedSeasons}
+              selectedEpisode={selectedEpisode}
+              onToggleSeason={toggleSeason}
+              onFetchEpisodeServers={fetchEpisodeServers}
+              onSelectEpisode={setSelectedEpisode}
+            />
+          )}
 
-            {!detailsLoading && !detailsError && details && (
-              <DetailsView
-                item={selected!}
-                details={details}
-                episodeServers={episodeServers}
-                episodeServersLoading={episodeServersLoading}
-                episodeServersError={episodeServersError}
-                expandedSeasons={expandedSeasons}
-                selectedEpisode={selectedEpisode}
-                onToggleSeason={toggleSeason}
-                onFetchEpisodeServers={fetchEpisodeServers}
-                onSelectEpisode={setSelectedEpisode}
-              />
-            )}
-          </ScrollArea>
-
-          {/* Footer actions */}
-          <div className="px-6 py-4 border-t border-zinc-800 shrink-0 flex flex-wrap items-center justify-between gap-2 bg-zinc-900/30">
+          {/* Footer actions (sticky at bottom of detail page) */}
+          <div className="mt-6 pt-4 border-t border-zinc-800 flex flex-wrap items-center justify-between gap-2">
             <div className="text-xs text-zinc-500 flex items-center gap-2">
               {details && (
                 <span>
@@ -581,8 +630,8 @@ export default function Home() {
               </Button>
             </div>
           </div>
-        </DialogContent>
-      </Dialog>
+        </main>
+      )}
     </div>
   )
 }
