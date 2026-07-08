@@ -595,7 +595,7 @@ function ResultCard({ item, onClick }: { item: SearchItem; onClick: () => void }
   return (
     <button
       onClick={onClick}
-      className="group text-left rounded-md sm:rounded-lg overflow-hidden border border-zinc-800 bg-zinc-900 hover:border-purple-600 hover:ring-2 hover:ring-purple-600/30 transition-all focus:outline-none focus:ring-2 focus:ring-purple-600"
+      className="group text-left rounded-md sm:rounded-lg overflow-hidden border border-zinc-800 bg-zinc-900 hover:border-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-600"
     >
       <div className="aspect-[2/3] bg-zinc-800 relative overflow-hidden">
         {item.poster ? (
@@ -603,7 +603,7 @@ function ResultCard({ item, onClick }: { item: SearchItem; onClick: () => void }
             src={item.poster}
             alt={item.name}
             loading="lazy"
-            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+            className="w-full h-full object-cover"
             onError={(e) => {
               ;(e.target as HTMLImageElement).style.display = 'none'
             }}
@@ -745,15 +745,15 @@ function DetailsView({
                 href={s.url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center justify-between gap-2 px-3 py-2 rounded-md border border-zinc-800 bg-zinc-900/60 hover:bg-zinc-800/60 hover:border-purple-600/50 transition-colors group"
+                className="flex items-center justify-between gap-2 px-3 py-2 rounded-md border border-zinc-800 bg-zinc-900/60 hover:bg-zinc-800/60 hover:border-purple-600/50 group"
               >
                 <div className="flex items-center gap-2 min-w-0">
-                  <Download className="w-3.5 h-3.5 text-zinc-500 group-hover:text-purple-400 shrink-0" />
+                  <Download className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
                   <span className="text-sm truncate">{s.name}</span>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
                   {s.size && s.size !== 'N/A' && <Badge variant="outline" className="border-zinc-700 text-zinc-400 text-xs">{s.size}</Badge>}
-                  <ExternalLink className="w-3 h-3 text-zinc-600 group-hover:text-purple-400" />
+                  <ExternalLink className="w-3 h-3 text-zinc-600" />
                 </div>
               </a>
             ))}
@@ -777,11 +777,11 @@ function DetailsView({
                 <div key={season.id} className="rounded-md border border-zinc-800 bg-zinc-900/60 overflow-hidden">
                   <button
                     onClick={() => onToggleSeason(season.id)}
-                    className="w-full flex items-center justify-between gap-2 px-3 py-2.5 hover:bg-zinc-800/60 transition-colors text-left"
+                    className="w-full flex items-center justify-between gap-2 px-3 py-2.5 hover:bg-zinc-800/60 text-left"
                   >
                     <div className="flex items-center gap-2 min-w-0">
                       <ChevronRight
-                        className={`w-4 h-4 text-zinc-400 transition-transform shrink-0 ${isExpanded ? 'rotate-90' : ''}`}
+                        className={`w-4 h-4 text-zinc-400 shrink-0 ${isExpanded ? 'rotate-90' : ''}`}
                       />
                       <span className="font-medium text-sm text-zinc-100">{season.name}</span>
                     </div>
@@ -868,7 +868,7 @@ function EpisodeRow({ episode, isSelected, servers, isLoading, hasError, onClick
     <div>
       <button
         onClick={onClick}
-        className={`w-full flex items-center gap-3 px-3 py-2 hover:bg-zinc-800/60 transition-colors text-left ${
+        className={`w-full flex items-center gap-3 px-3 py-2 hover:bg-zinc-800/60 text-left ${
           isSelected ? 'bg-purple-950/30' : ''
         }`}
       >
@@ -910,7 +910,7 @@ function EpisodeRow({ episode, isSelected, servers, isLoading, hasError, onClick
               {servers.length}
             </Badge>
           ) : (
-            <ChevronRight className={`w-4 h-4 text-zinc-500 transition-transform ${isSelected ? 'rotate-90' : ''}`} />
+            <ChevronRight className={`w-4 h-4 text-zinc-500 ${isSelected ? 'rotate-90' : ''}`} />
           )}
         </div>
       </button>
@@ -932,15 +932,15 @@ function EpisodeRow({ episode, isSelected, servers, isLoading, hasError, onClick
                   href={s.url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded border border-zinc-800 bg-zinc-900/60 hover:bg-zinc-800/60 hover:border-purple-600/50 transition-colors group"
+                  className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded border border-zinc-800 bg-zinc-900/60 hover:bg-zinc-800/60 hover:border-purple-600/50 group"
                 >
                   <div className="flex items-center gap-2 min-w-0">
-                    <Download className="w-3 h-3 text-zinc-500 group-hover:text-purple-400 shrink-0" />
+                    <Download className="w-3 h-3 text-zinc-500 shrink-0" />
                     <span className="text-xs truncate">{s.name}</span>
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0">
                     {s.size && s.size !== 'N/A' && <Badge variant="outline" className="border-zinc-700 text-zinc-400 text-[10px] px-1">{s.size}</Badge>}
-                    <ExternalLink className="w-2.5 h-2.5 text-zinc-600 group-hover:text-purple-400" />
+                    <ExternalLink className="w-2.5 h-2.5 text-zinc-600" />
                   </div>
                 </a>
               ))}
