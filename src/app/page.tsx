@@ -441,12 +441,12 @@ export default function Home() {
         )}
 
         {loading && (
-          <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-7 xl:grid-cols-8 gap-2 sm:gap-3 md:gap-4">
-            {Array.from({ length: 16 }).map((_, i) => (
+          <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 gap-2.5 sm:gap-3 md:gap-4">
+            {Array.from({ length: 12 }).map((_, i) => (
               <Card key={i} className="bg-zinc-900 border-zinc-800 overflow-hidden p-0">
                 <Skeleton className="aspect-[2/3] rounded-none bg-zinc-800" />
                 <div className="p-2 sm:p-3 space-y-1.5">
-                  <Skeleton className="h-3 sm:h-4 w-3/4 bg-zinc-800" />
+                  <Skeleton className="h-3.5 sm:h-4 w-3/4 bg-zinc-800" />
                   <Skeleton className="h-3 w-1/3 bg-zinc-800" />
                 </div>
               </Card>
@@ -467,7 +467,7 @@ export default function Home() {
             <div className="text-sm text-zinc-400 mb-4">
               {results.length} result{results.length === 1 ? '' : 's'} for <span className="text-zinc-200 font-medium">&ldquo;{query}&rdquo;</span>
             </div>
-            <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-7 xl:grid-cols-8 gap-2 sm:gap-3 md:gap-4">
+            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 gap-2.5 sm:gap-3 md:gap-4">
               {results.map((item) => (
                 <ResultCard key={`${item.type}-${item.id}`} item={item} onClick={() => openDetails(item)} />
               ))}
@@ -621,9 +621,9 @@ function ResultCard({ item, onClick }: { item: SearchItem; onClick: () => void }
           </Badge>
         </div>
       </div>
-      <div className="p-1.5 sm:p-3">
-        <h3 className="font-medium text-[11px] sm:text-sm leading-tight line-clamp-2 text-zinc-100">{item.name}</h3>
-        {item.year && <p className="text-[10px] sm:text-xs text-zinc-500 mt-0.5 sm:mt-1">{item.year}</p>}
+      <div className="p-2 sm:p-3">
+        <h3 className="font-medium text-xs sm:text-sm leading-tight line-clamp-2 text-zinc-100">{item.name}</h3>
+        {item.year && <p className="text-[11px] sm:text-xs text-zinc-500 mt-1">{item.year}</p>}
       </div>
     </button>
   )
