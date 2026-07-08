@@ -111,52 +111,202 @@ function sanitizeFilename(name: string): string {
   return name.replace(/[^a-zA-Z0-9-_]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '')
 }
 
-function buildJsonPayload(item: SearchItem, details: Details | null, episodeServers?: Map<number, Server[]>) {
-  return {
-    source: 'cinemm.com',
-    fetchedAt: details?.fetchedAt ?? new Date().toISOString(),
-    searchResult: {
-      id: item.id,
-      name: item.name,
-      year: item.year,
-      type: item.type,
-      source: item.source,
-      poster: item.poster,
-      tmdbId: item.tmdbId ?? null,
-      imdbId: item.imdbId ?? null,
-    },
-    details: details
-      ? {
-          overview: details.overview,
-          ...(details.type === 'movie'
-            ? {
-                servers: details.servers,
-                serverCount: details.servers.length,
-              }
-            : {
-                seasons: details.seasons.map((s) => ({
-                  id: s.id,
-                  name: s.name,
-                  is_end: s.is_end,
-                  episodeCount: s.episodes.length,
-                  episodes: s.episodes.map((e) => ({
-                    id: e.id,
-                    episode_number: e.episode_number,
-                    name: e.name,
-                    air_date: e.air_date,
-                    runtime: e.runtime,
-                    poster: e.poster,
-                    servers: episodeServers?.get(e.id) ?? [],
-                  })),
-                })),
-                seasonCount: details.seasons.length,
-              }),
-          remaining: details.remaining,
-          error: details.error,
-          sourceUrl: details.sourceUrl,
-        }
-      : null,
+// ---------------------------------------------------------------------------
+// JSON payload builders — match the user's desired format:
+//   { movies: [{ title, year, poster, overview, type, tmdbId, categories,
+//                resolution, fileSize, format, downloadLinks, watchLinks, seasons }] }
+//
+// Movies: servers split into downloadLinks / watchLinks (by "- Download" / "- Stream" in name)
+// Series: each episode has its own downloadLinks / watchLinks
+// ---------------------------------------------------------------------------
+
+interface ParsedDownloadLink {
+  serverName: string
+  url: string
+  size: string
+  quality: string
+  fileName: string
+}
+
+interface ParsedWatchLink {
+  serverName: string
+  url: string
+  size: string
+  quality: string
+}
+
+/** Extract quality token (4K, 1080p, 720p, 2160p, 480p) from a server name like "Tube 1, (4K) - Stream" */
+function parseQuality(serverName: string): string {
+  const m = serverName.match(/\((4K|1080p|720p|2160p|480p|8K)\)/i)
+  return m ? m[1] : 'Unknown'
+}
+
+/** Extract the file name (last path segment) from a URL, URL-decoded. */
+function parseFileName(url: string): string {
+  try {
+    const u = new URL(url)
+    const parts = u.pathname.split('/').filter(Boolean)
+    const last = parts[parts.length - 1]
+    return last ? decodeURIComponent(last) : ''
+  } catch {
+    return ''
   }
+}
+
+/** Split cinemm.com servers into download links and watch links. */
+function splitServers(servers: Server[]): {
+  downloadLinks: ParsedDownloadLink[]
+  watchLinks: ParsedWatchLink[]
+} {
+  const downloadLinks: ParsedDownloadLink[] = []
+  const watchLinks: ParsedWatchLink[] = []
+  for (const s of servers) {
+    const quality = parseQuality(s.name)
+    const fileName = parseFileName(s.url)
+    const isDownload = s.name.toLowerCase().includes('download')
+    if (isDownload) {
+      downloadLinks.push({
+        serverName: s.name,
+        url: s.url,
+        size: s.size,
+        quality,
+        fileName,
+      })
+    } else {
+      watchLinks.push({
+        serverName: s.name,
+        url: s.url,
+        size: s.size,
+        quality,
+      })
+    }
+  }
+  return { downloadLinks, watchLinks }
+}
+
+/** Parse overview text to extract categories, resolution, fileSize, format. */
+function parseOverviewMetadata(overview: string): {
+  categories: string[]
+  resolution: string
+  fileSize: string
+  format: string
+} {
+  const categories: string[] = []
+  let resolution = ''
+  let fileSize = ''
+  let format = ''
+
+  // Genre ..... Crime/ Drama
+  const genreMatch = overview.match(/Genre\s*[.…]+\s*(.+)/i)
+  if (genreMatch) {
+    const genres = genreMatch[1]
+      .split(/[\/,]/)
+      .map((g) => g.trim())
+      .filter(Boolean)
+    categories.push(...genres)
+  }
+
+  // Quality….BluRay 4K HEVC/ 1080p HEVC/ 720p  →  "4K / 1080p / 720p"
+  const qualityMatch = overview.match(/Quality\s*[.…]+\s*(.+)/i)
+  if (qualityMatch) {
+    const resolutions = qualityMatch[1].match(/\d+K|\d+p/gi)
+    if (resolutions) resolution = [...new Set(resolutions)].join(' / ')
+  }
+
+  // File size…(9 GB)/ (2.6 GB ) / (1.6 GB)  →  "9 GB / 2.6 GB / 1.6 GB"
+  const fileSizeMatch = overview.match(/File\s*size\s*[.…]+\s*(.+)/i)
+  if (fileSizeMatch) {
+    const sizes = fileSizeMatch[1].match(/(\d+(?:\.\d+)?\s*(?:GB|MB|TB))/gi)
+    if (sizes) fileSize = sizes.join(' / ')
+  }
+
+  // Format…mkv/mp4  →  "mkv / mp4"
+  const formatMatch = overview.match(/Format\s*[.…]+\s*(.+)/i)
+  if (formatMatch) {
+    const formats = formatMatch[1].match(/mkv|mp4|avi|mov|flv|webm|hevc|x264|x265/gi)
+    if (formats) format = [...new Set(formats)].join(' / ')
+  }
+
+  return { categories, resolution, fileSize, format }
+}
+
+function buildJsonPayload(
+  item: SearchItem,
+  details: Details | null,
+  episodeServers?: Map<number, Server[]>,
+) {
+  const overview = details?.overview ?? ''
+  const metadata = parseOverviewMetadata(overview)
+  const tmdbId = item.tmdbId ? Number(item.tmdbId) : null
+
+  let movieEntry: Record<string, unknown>
+
+  if (details?.type === 'movie') {
+    const { downloadLinks, watchLinks } = splitServers(details.servers)
+    movieEntry = {
+      title: item.name,
+      year: item.year,
+      poster: item.poster,
+      overview,
+      type: 'movie',
+      tmdbId,
+      categories: metadata.categories,
+      resolution: metadata.resolution,
+      fileSize: metadata.fileSize,
+      format: metadata.format,
+      downloadLinks,
+      watchLinks,
+      seasons: [],
+    }
+  } else if (details?.type === 'series') {
+    const seasons = details.seasons.map((s) => ({
+      name: s.name,
+      episodes: s.episodes.map((e) => {
+        const epServers = episodeServers?.get(e.id) ?? []
+        const { downloadLinks, watchLinks } = splitServers(epServers)
+        return {
+          name: e.name || `Episode ${e.episode_number}`,
+          videoUrl: watchLinks[0]?.url ?? downloadLinks[0]?.url ?? '',
+          downloadLinks,
+          watchLinks,
+        }
+      }),
+    }))
+    movieEntry = {
+      title: item.name,
+      year: item.year,
+      poster: item.poster,
+      overview,
+      type: 'series',
+      tmdbId,
+      categories: metadata.categories,
+      resolution: metadata.resolution,
+      fileSize: metadata.fileSize,
+      format: metadata.format,
+      downloadLinks: [],
+      watchLinks: [],
+      seasons,
+    }
+  } else {
+    // No details loaded (quota exceeded / not fetched yet)
+    movieEntry = {
+      title: item.name,
+      year: item.year,
+      poster: item.poster,
+      overview: '',
+      type: item.type,
+      tmdbId,
+      categories: [],
+      resolution: '',
+      fileSize: '',
+      format: '',
+      downloadLinks: [],
+      watchLinks: [],
+      seasons: [],
+    }
+  }
+
+  return { movies: [movieEntry] }
 }
 
 function downloadJson(filename: string, data: unknown) {
