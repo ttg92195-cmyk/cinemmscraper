@@ -227,19 +227,27 @@ function parseRsc(text: string): Map<string, string> {
 async function callAction(
   actionId: string,
   args: unknown[],
-  opts: { retries?: number } = {},
+  opts: { retries?: number; visitorUuid?: string | null } = {},
 ): Promise<{ lines: Map<string, string>; raw: string }> {
   const retries = opts.retries ?? 1
   let lastError: unknown = null
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const body = JSON.stringify(args)
+      const headers: Record<string, string> = {
+        ...COMMON_HEADERS,
+        'Next-Action': actionId,
+      }
+      // When the user supplies their own cinemm.com visitor UUID, send it
+      // as a cookie. cinemm.com tracks quota per UUID, so using a known-good
+      // UUID (minted via cinemm.com directly) bypasses our auto-refresh logic
+      // and its IP rate-limiting side effects.
+      if (opts.visitorUuid) {
+        headers['Cookie'] = `user_uuid=${opts.visitorUuid}`
+      }
       const res = await fetch(CINEMM_ORIGIN + '/', {
         method: 'POST',
-        headers: {
-          ...COMMON_HEADERS,
-          'Next-Action': actionId,
-        },
+        headers,
         body,
       })
       if (!res.ok) {
@@ -449,59 +457,14 @@ export async function searchCinemm(
 }
 
 /**
- * Fetch full details for a movie (servers + overview).
- * Quota-limited — use caching to avoid burning quota.
- *
- * If the source returns QUOTA_EXCEEDED, we surface that to the caller as
- * `error: "QUOTA_EXCEEDED"` and DO NOT cache the empty result, so the next
- * call can retry.
+ * Parse the RSC response from getMovieServersAction into a CinemmMovieDetails.
+ * Shared between the user-UUID path and the auto-refresh path.
  */
-export async function getMovieDetails(
-  id: number,
-  source: string,
-  name?: string,
-  year?: string,
-  poster?: string,
-  opts: { useCache?: boolean } = {},
-): Promise<CinemmMovieDetails> {
-  const key = `details:movie:${id}:${source}`
-  if (opts.useCache !== false) {
-    const cached = await getCached<CinemmMovieDetails>(key)
-    // Only return cached result if it has actual content (servers or overview)
-    if (cached && (cached.servers.length > 0 || cached.overview.length > 0)) {
-      return cached
-    }
-  }
-
-  let { lines } = await callAction(ACTIONS.getMovieServers, [id, source])
-  let raw = lines.get('1')
-  // If we got QUOTA_EXCEEDED, try refreshing the visitor quota and retrying once.
-  if (raw && JSON.parse(raw).error === 'QUOTA_EXCEEDED') {
-    const refreshed = await refreshVisitorQuota()
-    if (refreshed && refreshed.remaining > 0) {
-      const retry = await callAction(ACTIONS.getMovieServers, [id, source])
-      lines = retry.lines
-      raw = retry.lines.get('1')
-      // Refresh succeeded → top-up pool in background for next time.
-      topUpPoolInBackground()
-    } else {
-      // Pool drained AND IP is rate-limited. Surface a clearer error.
-      return {
-        id,
-        name: name ?? '',
-        year: year ?? '',
-        poster: poster ?? '',
-        type: 'movie',
-        source,
-        overview: '',
-        servers: [],
-        remaining: 0,
-        error: 'IP_RATE_LIMITED',
-        fetchedAt: new Date().toISOString(),
-        sourceUrl: `${CINEMM_ORIGIN}/?search=${encodeURIComponent(name ?? '')}&type=movie`,
-      }
-    }
-  }
+function parseMovieDetailsResponse(
+  lines: Map<string, string>,
+  ctx: { id: number; source: string; name?: string; year?: string; poster?: string },
+): CinemmMovieDetails {
+  const raw = lines.get('1')
   let servers: CinemmServer[] = []
   let remaining = 0
   let error: string | null = null
@@ -525,7 +488,6 @@ export async function getMovieDetails(
       const overviewRef = parsed.overview
       if (typeof overviewRef === 'string' && overviewRef.startsWith('$')) {
         overview = lines.get(overviewRef.substring(1)) ?? ''
-        // Some text chunks still have the "T<hex>," prefix attached
         const tMatch = overview.match(/^T[0-9a-f]+,(.*)$/s)
         if (tMatch) overview = tMatch[1]
       } else if (typeof overviewRef === 'string' && overviewRef !== '$undefined') {
@@ -536,26 +498,91 @@ export async function getMovieDetails(
       error = 'PARSE_ERROR'
     }
   } else {
-    // No "1:" line at all — treat as an error so we don't cache empty result
     error = 'NO_RETURN_VALUE'
   }
 
-  const result: CinemmMovieDetails = {
-    id,
-    name: name ?? '',
-    year: year ?? '',
-    poster: poster ?? '',
+  return {
+    id: ctx.id,
+    name: ctx.name ?? '',
+    year: ctx.year ?? '',
+    poster: ctx.poster ?? '',
     type: 'movie',
-    source,
+    source: ctx.source,
     overview,
     servers,
     remaining,
     error,
     fetchedAt: new Date().toISOString(),
-    sourceUrl: `${CINEMM_ORIGIN}/?search=${encodeURIComponent(name ?? '')}&type=movie`,
+    sourceUrl: `${CINEMM_ORIGIN}/?search=${encodeURIComponent(ctx.name ?? '')}&type=movie`,
   }
-  // Only cache results that have real content
-  if (!error && (servers.length > 0 || overview.length > 0)) {
+}
+
+/**
+ * Fetch full details for a movie (servers + overview).
+ * Quota-limited — use caching to avoid burning quota.
+ *
+ * If the source returns QUOTA_EXCEEDED, we surface that to the caller as
+ * `error: "QUOTA_EXCEEDED"` and DO NOT cache the empty result, so the next
+ * call can retry.
+ */
+export async function getMovieDetails(
+  id: number,
+  source: string,
+  name?: string,
+  year?: string,
+  poster?: string,
+  opts: { useCache?: boolean; visitorUuid?: string | null } = {},
+): Promise<CinemmMovieDetails> {
+  const key = `details:movie:${id}:${source}`
+  if (opts.useCache !== false) {
+    const cached = await getCached<CinemmMovieDetails>(key)
+    if (cached && (cached.servers.length > 0 || cached.overview.length > 0)) {
+      return cached
+    }
+  }
+
+  // If user supplied their own cinemm.com UUID, use it directly (no auto-refresh).
+  if (opts.visitorUuid) {
+    const { lines } = await callAction(ACTIONS.getMovieServers, [id, source], {
+      visitorUuid: opts.visitorUuid,
+    })
+    const result = parseMovieDetailsResponse(lines, { id, source, name, year, poster })
+    if (!result.error && (result.servers.length > 0 || result.overview.length > 0)) {
+      await setCached(key, result)
+    }
+    return result
+  }
+
+  // Auto-refresh path: try, on QUOTA_EXCEEDED refresh UUID + retry.
+  let { lines } = await callAction(ACTIONS.getMovieServers, [id, source])
+  let raw = lines.get('1')
+  if (raw && JSON.parse(raw).error === 'QUOTA_EXCEEDED') {
+    const refreshed = await refreshVisitorQuota()
+    if (refreshed && refreshed.remaining > 0) {
+      const retry = await callAction(ACTIONS.getMovieServers, [id, source])
+      lines = retry.lines
+      raw = retry.lines.get('1')
+      topUpPoolInBackground()
+    } else {
+      return {
+        id,
+        name: name ?? '',
+        year: year ?? '',
+        poster: poster ?? '',
+        type: 'movie',
+        source,
+        overview: '',
+        servers: [],
+        remaining: 0,
+        error: 'IP_RATE_LIMITED',
+        fetchedAt: new Date().toISOString(),
+        sourceUrl: `${CINEMM_ORIGIN}/?search=${encodeURIComponent(name ?? '')}&type=movie`,
+      }
+    }
+  }
+
+  const result = parseMovieDetailsResponse(lines, { id, source, name, year, poster })
+  if (!result.error && (result.servers.length > 0 || result.overview.length > 0)) {
     await setCached(key, result)
   }
   return result
@@ -571,12 +598,22 @@ export async function getSeriesDetails(
   name?: string,
   year?: string,
   poster?: string,
-  opts: { useCache?: boolean } = {},
+  opts: { useCache?: boolean; visitorUuid?: string | null } = {},
 ): Promise<CinemmSeriesDetails> {
   const key = `details:series:${id}:${source}`
   if (opts.useCache !== false) {
     const cached = await getCached<CinemmSeriesDetails>(key)
     if (cached && cached.overview.length > 0) return cached
+  }
+
+  // If user supplied their own cinemm.com UUID, use it directly (no auto-refresh).
+  if (opts.visitorUuid) {
+    const { lines } = await callAction(ACTIONS.getSeriesDetails, [id, source], {
+      visitorUuid: opts.visitorUuid,
+    })
+    const result = parseSeriesDetailsResponse(lines, { id, source, name, year, poster })
+    if (result.overview || result.seasons.length > 0) await setCached(key, result)
+    return result
   }
 
   let { lines } = await callAction(ACTIONS.getSeriesDetails, [id, source])
@@ -631,6 +668,21 @@ export async function getSeriesDetails(
     }
   }
 
+  const result = parseSeriesDetailsResponse(lines, { id, source, name, year, poster }, overview, seasons)
+  if (result.overview || result.seasons.length > 0) await setCached(key, result)
+  return result
+}
+
+/**
+ * Parse the RSC response from getSeriesDetailsAction into a CinemmSeriesDetails.
+ * Shared between the user-UUID path and the auto-refresh path.
+ */
+function parseSeriesDetailsResponse(
+  lines: Map<string, string>,
+  ctx: { id: number; source: string; name?: string; year?: string; poster?: string },
+  overview = '',
+  seasons: CinemmSeason[] = [],
+): CinemmSeriesDetails {
   // Look for remaining quota info on line "6:" (initialUser payload)
   let remaining = 0
   const userPayload = lines.get('6')
@@ -641,22 +693,20 @@ export async function getSeriesDetails(
 
   const error = overview || seasons.length > 0 ? null : 'NO_OVERVIEW'
 
-  const result: CinemmSeriesDetails = {
-    id,
-    name: name ?? '',
-    year: year ?? '',
-    poster: poster ?? '',
+  return {
+    id: ctx.id,
+    name: ctx.name ?? '',
+    year: ctx.year ?? '',
+    poster: ctx.poster ?? '',
     type: 'series',
-    source,
+    source: ctx.source,
     overview,
     seasons,
     remaining,
     error,
     fetchedAt: new Date().toISOString(),
-    sourceUrl: `${CINEMM_ORIGIN}/?search=${encodeURIComponent(name ?? '')}&type=series`,
+    sourceUrl: `${CINEMM_ORIGIN}/?search=${encodeURIComponent(ctx.name ?? '')}&type=series`,
   }
-  if (overview || seasons.length > 0) await setCached(key, result)
-  return result
 }
 
 /**
@@ -666,12 +716,22 @@ export async function getSeriesDetails(
 export async function getEpisodeServers(
   episodeId: number,
   source: string,
-  opts: { useCache?: boolean } = {},
+  opts: { useCache?: boolean; visitorUuid?: string | null } = {},
 ): Promise<CinemmEpisodeDetails> {
   const key = `episode:${episodeId}:${source}`
   if (opts.useCache !== false) {
     const cached = await getCached<CinemmEpisodeDetails>(key)
     if (cached && cached.servers.length > 0) return cached
+  }
+
+  // If user supplied their own cinemm.com UUID, use it directly (no auto-refresh).
+  if (opts.visitorUuid) {
+    const { lines } = await callAction(ACTIONS.getEpisodeServers, [episodeId, source], {
+      visitorUuid: opts.visitorUuid,
+    })
+    const result = parseEpisodeServersResponse(lines, episodeId)
+    if (!result.error && result.servers.length > 0) await setCached(key, result)
+    return result
   }
 
   let { lines } = await callAction(ACTIONS.getEpisodeServers, [episodeId, source])
@@ -696,6 +756,17 @@ export async function getEpisodeServers(
     }
   }
 
+  const result = parseEpisodeServersResponse(lines, episodeId)
+  if (!result.error && result.servers.length > 0) await setCached(key, result)
+  return result
+}
+
+/** Parse the RSC response from getEpisodeServersAction into CinemmEpisodeDetails. */
+function parseEpisodeServersResponse(
+  lines: Map<string, string>,
+  episodeId: number,
+): CinemmEpisodeDetails {
+  const raw = lines.get('1')
   let servers: CinemmServer[] = []
   let remaining = 0
   let error: string | null = null
@@ -708,7 +779,6 @@ export async function getEpisodeServers(
       }
       servers = (parsed.servers ?? []).map((s) => ({
         ...s,
-        // Normalize size: server returns null when unknown
         size: s.size ?? 'N/A',
       }))
       remaining = parsed.remaining ?? 0
@@ -720,16 +790,13 @@ export async function getEpisodeServers(
   } else {
     error = 'NO_RETURN_VALUE'
   }
-
-  const result: CinemmEpisodeDetails = {
+  return {
     episodeId,
     servers,
     remaining,
     error,
     fetchedAt: new Date().toISOString(),
   }
-  if (!error && servers.length > 0) await setCached(key, result)
-  return result
 }
 
 /**
@@ -737,7 +804,7 @@ export async function getEpisodeServers(
  */
 export async function getDetails(
   item: Pick<CinemmSearchItem, 'id' | 'type' | 'source' | 'name' | 'year' | 'poster'>,
-  opts?: { useCache?: boolean },
+  opts?: { useCache?: boolean; visitorUuid?: string | null },
 ): Promise<CinemmDetails> {
   if (item.type === 'movie') {
     return getMovieDetails(item.id, item.source, item.name, item.year, item.poster, opts)

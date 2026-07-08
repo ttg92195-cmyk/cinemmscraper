@@ -21,6 +21,9 @@ export async function GET(req: NextRequest) {
   const year = searchParams.get('year') ?? ''
   const poster = searchParams.get('poster') ?? ''
   const useCache = searchParams.get('cache') !== 'false'
+  // Optional: visitor UUID supplied by the user (from cinemm.com). When present,
+  // we use it directly instead of the auto-refresh path, bypassing IP rate limits.
+  const visitorUuid = searchParams.get('uuid') || null
 
   const id = parseInt(idStr, 10)
   if (!Number.isFinite(id) || id <= 0) {
@@ -36,7 +39,7 @@ export async function GET(req: NextRequest) {
   try {
     const details = await getDetails(
       { id, type, source, name, year, poster },
-      { useCache },
+      { useCache, visitorUuid },
     )
     // Always return 200 — the UI handles quota errors gracefully by showing
     // the search-result info and a partial JSON download option.

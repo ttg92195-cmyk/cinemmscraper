@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useCallback, useEffect, useMemo } from 'react'
-import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight, ArrowLeft } from 'lucide-react'
+import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight, ArrowLeft, KeyRound, Settings } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -347,6 +347,45 @@ export default function Home() {
   const [expandedSeasons, setExpandedSeasons] = useState<Set<number>>(new Set())
   const [selectedEpisode, setSelectedEpisode] = useState<number | null>(null)
 
+  // User-supplied cinemm.com visitor UUID (from localStorage). When present,
+  // requests use this UUID directly via the user_uuid cookie — bypassing the
+  // auto-refresh path and its IP rate-limiting side effects.
+  const [visitorUuid, setVisitorUuid] = useState<string | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [uuidInput, setUuidInput] = useState('')
+
+  // Load UUID from localStorage on mount
+  useEffect(() => {
+    const stored = window.localStorage.getItem('cinemm_visitor_uuid')
+    if (stored) {
+      setVisitorUuid(stored)
+      setUuidInput(stored)
+    }
+  }, [])
+
+  const saveVisitorUuid = useCallback(() => {
+    const trimmed = uuidInput.trim()
+    if (trimmed) {
+      window.localStorage.setItem('cinemm_visitor_uuid', trimmed)
+      setVisitorUuid(trimmed)
+      toast.success('UUID saved — will be used for all detail fetches')
+      setSettingsOpen(false)
+    } else {
+      // Empty input = clear
+      window.localStorage.removeItem('cinemm_visitor_uuid')
+      setVisitorUuid(null)
+      toast.info('UUID cleared — using auto-refresh mode')
+      setSettingsOpen(false)
+    }
+  }, [uuidInput])
+
+  const clearVisitorUuid = useCallback(() => {
+    window.localStorage.removeItem('cinemm_visitor_uuid')
+    setVisitorUuid(null)
+    setUuidInput('')
+    toast.info('UUID cleared — using auto-refresh mode')
+  }, [])
+
   const onSubmit = useCallback(
     async (e?: React.FormEvent) => {
       e?.preventDefault()
@@ -408,6 +447,7 @@ export default function Home() {
       url.searchParams.set('name', item.name)
       url.searchParams.set('year', item.year)
       url.searchParams.set('poster', item.poster)
+      if (visitorUuid) url.searchParams.set('uuid', visitorUuid)
       const res = await fetch(url.toString())
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || `Failed (${res.status})`)
@@ -429,7 +469,7 @@ export default function Home() {
     } finally {
       setDetailsLoading(false)
     }
-  }, [])
+  }, [visitorUuid])
 
   const closeDetails = useCallback(() => {
     // Pop the URL state we pushed in openDetails so the browser back button
@@ -493,7 +533,8 @@ export default function Home() {
         return next
       })
       try {
-        const res = await fetch(`/api/episode-servers?episodeId=${episodeId}&source=${source}`)
+        const uuidParam = visitorUuid ? `&uuid=${encodeURIComponent(visitorUuid)}` : ''
+        const res = await fetch(`/api/episode-servers?episodeId=${episodeId}&source=${source}${uuidParam}`)
         const data: EpisodeServers = await res.json()
         if (!res.ok) throw new Error((data as { error?: string }).error || `Failed (${res.status})`)
         if (data.error === 'IP_RATE_LIMITED') {
@@ -516,7 +557,7 @@ export default function Home() {
         })
       }
     },
-    [episodeServers, episodeServersLoading],
+    [episodeServers, episodeServersLoading, visitorUuid],
   )
 
   const handleDownloadJson = useCallback(() => {
@@ -557,15 +598,86 @@ export default function Home() {
               <p className="text-xs text-zinc-400 mt-1">Search movies & series, download as JSON</p>
             </div>
           </div>
-          <a
-            href="https://cinemm.com"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-xs text-zinc-400 hover:text-zinc-200 flex items-center gap-1"
-          >
-            cinemm.com <ExternalLink className="w-3 h-3" />
-          </a>
+          <div className="flex items-center gap-3">
+            {visitorUuid && (
+              <Badge variant="outline" className="border-green-900/50 text-green-400 text-xs">
+                <KeyRound className="w-3 h-3 mr-1" /> UUID active
+              </Badge>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setSettingsOpen((v) => !v)}
+              className="bg-zinc-900 border-zinc-700 hover:bg-zinc-800 text-zinc-100"
+            >
+              <Settings className="w-4 h-4" />
+              <span className="ml-2 hidden sm:inline">Settings</span>
+            </Button>
+            <a
+              href="https://cinemm.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs text-zinc-400 hover:text-zinc-200 flex items-center gap-1"
+            >
+              cinemm.com <ExternalLink className="w-3 h-3" />
+            </a>
+          </div>
         </div>
+
+        {/* Settings panel (collapsible) */}
+        {settingsOpen && (
+          <div className="border-t border-zinc-800 bg-zinc-900/80 px-4 py-4">
+            <div className="container mx-auto max-w-3xl space-y-3">
+              <div className="flex items-center gap-2">
+                <KeyRound className="w-4 h-4 text-purple-400" />
+                <h3 className="text-sm font-semibold text-zinc-100">cinemm.com Visitor UUID</h3>
+              </div>
+              <p className="text-xs text-zinc-400 leading-relaxed">
+                Paste your cinemm.com visitor UUID here to use it directly for all detail fetches.
+                This bypasses the auto-refresh logic (and its IP rate-limiting side effects).
+                Visit{' '}
+                <a href="https://cinemm.com" target="_blank" rel="noopener noreferrer" className="text-purple-400 hover:text-purple-300 underline">
+                  cinemm.com
+                </a>{' '}
+                → open browser DevTools (F12) → Application → Cookies → copy the value of{' '}
+                <code className="px-1 py-0.5 bg-zinc-800 rounded text-zinc-200">user_uuid</code>.
+              </p>
+              <div className="flex gap-2">
+                <Input
+                  type="text"
+                  placeholder="e.g. a9e6035a-33e9-4b72-bd66-0a3493533018"
+                  value={uuidInput}
+                  onChange={(e) => setUuidInput(e.target.value)}
+                  className="bg-zinc-950 border-zinc-700 text-zinc-100 placeholder:text-zinc-600 focus-visible:ring-purple-500 font-mono text-sm"
+                />
+                <Button
+                  size="sm"
+                  onClick={saveVisitorUuid}
+                  className="bg-purple-600 hover:bg-purple-700 text-white"
+                >
+                  Save
+                </Button>
+                {visitorUuid && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={clearVisitorUuid}
+                    className="bg-zinc-900 border-zinc-700 hover:bg-zinc-800 text-zinc-100"
+                  >
+                    Clear
+                  </Button>
+                )}
+              </div>
+              <p className="text-xs text-zinc-500">
+                Status: {visitorUuid ? (
+                  <span className="text-green-400">UUID active — direct mode (no auto-refresh)</span>
+                ) : (
+                  <span className="text-zinc-400">No UUID — auto-refresh mode (IP rate-limited)</span>
+                )}
+              </p>
+            </div>
+          </div>
+        )}
       </header>
 
       {/* Search (hidden when viewing a detail page) */}

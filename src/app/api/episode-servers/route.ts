@@ -14,6 +14,8 @@ export async function GET(req: NextRequest) {
   const episodeIdStr = searchParams.get('episodeId') ?? ''
   const source = searchParams.get('source') ?? 'CM'
   const useCache = searchParams.get('cache') !== 'false'
+  // Optional: visitor UUID supplied by the user (from cinemm.com).
+  const visitorUuid = searchParams.get('uuid') || null
 
   const episodeId = parseInt(episodeIdStr, 10)
   if (!Number.isFinite(episodeId) || episodeId <= 0) {
@@ -24,7 +26,7 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const result = await getEpisodeServers(episodeId, source, { useCache })
+    const result = await getEpisodeServers(episodeId, source, { useCache, visitorUuid })
     return NextResponse.json(result, { status: 200 })
   } catch (e) {
     console.error('[/api/episode-servers] error:', e)
