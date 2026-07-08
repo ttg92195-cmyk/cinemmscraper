@@ -416,7 +416,9 @@ export default function Home() {
       if ((data as Details).type === 'series' && (data as SeriesDetails).seasons.length > 0) {
         setExpandedSeasons(new Set([(data as SeriesDetails).seasons[0].id]))
       }
-      if ((data as Details).error === 'QUOTA_EXCEEDED') {
+      if ((data as Details).error === 'IP_RATE_LIMITED') {
+        toast.error('cinemm.com IP rate-limited. Try a VPN, switch network, or wait ~1 hour.', { duration: 8000 })
+      } else if ((data as Details).error === 'QUOTA_EXCEEDED') {
         toast.warning('cinemm.com quota exceeded — showing partial data. JSON download still works.')
       } else if ((data as Details).error) {
         toast.warning(`Could not fetch full details: ${(data as Details).error}`)
@@ -494,7 +496,10 @@ export default function Home() {
         const res = await fetch(`/api/episode-servers?episodeId=${episodeId}&source=${source}`)
         const data: EpisodeServers = await res.json()
         if (!res.ok) throw new Error((data as { error?: string }).error || `Failed (${res.status})`)
-        if (data.error === 'QUOTA_EXCEEDED') {
+        if (data.error === 'IP_RATE_LIMITED') {
+          setEpisodeServersError((prev) => new Set(prev).add(episodeId))
+          toast.error('cinemm.com IP rate-limited. Try a VPN, switch network, or wait ~1 hour.', { id: `ep-${episodeId}`, duration: 8000 })
+        } else if (data.error === 'QUOTA_EXCEEDED') {
           setEpisodeServersError((prev) => new Set(prev).add(episodeId))
           toast.warning('cinemm.com quota exceeded — try again later', { id: `ep-${episodeId}` })
         } else {
@@ -862,6 +867,7 @@ function DetailsView({
   const hasOverview = !!details.overview
   const isQuotaExceeded = details.error === 'QUOTA_EXCEEDED'
   const hasPartialInfo = !hasServers && !hasSeasons && !hasOverview
+  const isIpRateLimited = details.error === 'IP_RATE_LIMITED'
 
   return (
     <div className="space-y-5">
@@ -903,7 +909,24 @@ function DetailsView({
               </div>
             </div>
           )}
-          {details.error && details.error !== 'QUOTA_EXCEEDED' && (
+          {isIpRateLimited && (
+            <div className="mt-2 p-2 rounded border border-red-900/50 bg-red-950/30 text-red-200 text-xs flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+              <div>
+                <div className="font-semibold">cinemm.com IP rate-limited</div>
+                <div className="text-red-300/80 mt-0.5">
+                  Too many quota refreshes from your IP. The auto-refresh can&apos;t mint a new visitor right now.
+                  You can still download the basic info as JSON, or try one of these:
+                  <ul className="list-disc ml-4 mt-1 space-y-0.5">
+                    <li>Use a VPN to get a fresh IP</li>
+                    <li>Switch networks (e.g. mobile data instead of WiFi)</li>
+                    <li>Wait ~1 hour for the rate-limit to reset</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          )}
+          {details.error && details.error !== 'QUOTA_EXCEEDED' && details.error !== 'IP_RATE_LIMITED' && (
             <div className="mt-2 p-2 rounded border border-amber-900/50 bg-amber-950/30 text-amber-200 text-xs flex items-start gap-2">
               <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
               <div>

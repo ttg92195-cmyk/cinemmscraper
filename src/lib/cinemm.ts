@@ -262,11 +262,23 @@ async function callAction(
  * QUOTA_EXCEEDED). By calling this before a detail fetch, we can request a
  * fresh UUID with full quota.
  *
+ * IP-based rate limiting: cinemm.com limits how many UUIDs a single IP can
+ * mint within a short window. If we mint too many too fast, the IP gets
+ * rate-limited and subsequent identifyUserAction calls return a stale UUID
+ * instead of a fresh one. To mitigate this:
+ *
+ *   1. We pre-warm a small pool of UUIDs (3) on first quota-exceeded event.
+ *   2. We serve UUIDs from the pool first before minting new ones.
+ *   3. We respect a cooldown between mint attempts to avoid rate-limiting.
+ *   4. We detect rate-limited responses (stale UUID / zero remaining) and
+ *      return a sentinel error so callers can surface a clear message.
+ *
  * Note: the site's Set-Cookie response associates the UUID with future
  * requests automatically; we don't need to do anything special with it.
  * Returns the visitor info object.
  */
-async function refreshVisitorQuota(): Promise<{
+
+interface VisitorInfo {
   uuid: string
   pin: string
   usageCount: number
@@ -274,20 +286,100 @@ async function refreshVisitorQuota(): Promise<{
   isPremium: boolean
   bonusCredits: number
   remaining: number
-} | null> {
+}
+
+// In-memory UUID pool. Survives across requests within the same server
+// process. Cleared on server restart (which is fine — fresh start).
+const uuidPool: VisitorInfo[] = []
+const POOL_TARGET_SIZE = 3
+const MINT_COOLDOWN_MS = 2000 // 2s between mint attempts
+let lastMintAt = 0
+// Single-flight guard so concurrent callers don't all mint at once.
+let inflightMint: Promise<VisitorInfo | null> | null = null
+
+async function mintFreshUuid(): Promise<VisitorInfo | null> {
+  // Generate a random fingerprint-like ID (the site accepts any string)
+  const fp = Array.from({ length: 20 }, () =>
+    Math.floor(Math.random() * 16).toString(16),
+  ).join('')
   try {
-    // Generate a random fingerprint-like ID (the site accepts any string)
-    const fp = Array.from({ length: 20 }, () =>
-      Math.floor(Math.random() * 16).toString(16),
-    ).join('')
     const { lines } = await callAction(ACTIONS.identifyUser, [fp, undefined])
     const raw = lines.get('1')
     if (!raw) return null
-    return JSON.parse(raw)
+    const info = JSON.parse(raw) as VisitorInfo
+    // Detect rate-limited / stale UUID: if remaining is 0 on a fresh mint,
+    // the IP is rate-limited and cinemm.com returned an exhausted UUID.
+    if (info.remaining <= 0) {
+      return null
+    }
+    return info
   } catch (e) {
-    console.error('refreshVisitorQuota failed:', e)
+    console.error('mintFreshUuid failed:', e)
     return null
   }
+}
+
+/**
+ * Get a visitor UUID with quota remaining. Tries the pool first, then mints
+ * a new one (with cooldown to avoid IP rate-limiting).
+ */
+async function getUsableUuid(): Promise<VisitorInfo | null> {
+  // 1. Try to drain an entry from the pool that still has remaining quota.
+  while (uuidPool.length > 0) {
+    const candidate = uuidPool.shift()!
+    if (candidate.remaining > 0) return candidate
+  }
+
+  // 2. Honor cooldown to avoid IP rate-limiting.
+  const now = Date.now()
+  const elapsed = now - lastMintAt
+  if (elapsed < MINT_COOLDOWN_MS) {
+    await new Promise((r) => setTimeout(r, MINT_COOLDOWN_MS - elapsed))
+  }
+  lastMintAt = Date.now()
+
+  // 3. Single-flight: if another caller is already minting, wait for it.
+  if (inflightMint) {
+    const shared = await inflightMint
+    if (shared && shared.remaining > 0) return shared
+  }
+
+  // 4. Mint a fresh UUID.
+  inflightMint = mintFreshUuid()
+  const info = await inflightMint
+  inflightMint = null
+  return info
+}
+
+/**
+ * Top-up the UUID pool in the background (best-effort, non-blocking).
+ * Called after a successful detail fetch to keep the pool warm.
+ */
+function topUpPoolInBackground() {
+  if (uuidPool.length >= POOL_TARGET_SIZE) return
+  // Fire-and-forget; errors are swallowed.
+  ;(async () => {
+    while (uuidPool.length < POOL_TARGET_SIZE) {
+      const now = Date.now()
+      const elapsed = now - lastMintAt
+      if (elapsed < MINT_COOLDOWN_MS) {
+        await new Promise((r) => setTimeout(r, MINT_COOLDOWN_MS - elapsed))
+      }
+      lastMintAt = Date.now()
+      const info = await mintFreshUuid()
+      if (!info) break // rate-limited or error — stop trying
+      uuidPool.push(info)
+    }
+  })().catch(() => {})
+}
+
+/**
+ * Refresh quota when a detail fetch hits QUOTA_EXCEEDED.
+ * Returns a fresh visitor with quota, or null if the IP is rate-limited
+ * (in which case the caller should surface a "try VPN" message).
+ */
+async function refreshVisitorQuota(): Promise<VisitorInfo | null> {
+  return getUsableUuid()
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +482,24 @@ export async function getMovieDetails(
       const retry = await callAction(ACTIONS.getMovieServers, [id, source])
       lines = retry.lines
       raw = retry.lines.get('1')
+      // Refresh succeeded → top-up pool in background for next time.
+      topUpPoolInBackground()
+    } else {
+      // Pool drained AND IP is rate-limited. Surface a clearer error.
+      return {
+        id,
+        name: name ?? '',
+        year: year ?? '',
+        poster: poster ?? '',
+        type: 'movie',
+        source,
+        overview: '',
+        servers: [],
+        remaining: 0,
+        error: 'IP_RATE_LIMITED',
+        fetchedAt: new Date().toISOString(),
+        sourceUrl: `${CINEMM_ORIGIN}/?search=${encodeURIComponent(name ?? '')}&type=movie`,
+      }
     }
   }
   let servers: CinemmServer[] = []
@@ -489,6 +599,23 @@ export async function getSeriesDetails(
       const tRetry = overview.match(/^T[0-9a-f]+,(.*)$/s)
       if (tRetry) overview = tRetry[1]
       seasonsJson = retry.lines.get('1') ?? ''
+      topUpPoolInBackground()
+    } else {
+      // Pool drained AND IP is rate-limited. Surface a clearer error.
+      return {
+        id,
+        name: name ?? '',
+        year: year ?? '',
+        poster: poster ?? '',
+        type: 'series',
+        source,
+        overview: '',
+        seasons: [],
+        remaining: 0,
+        error: 'IP_RATE_LIMITED',
+        fetchedAt: new Date().toISOString(),
+        sourceUrl: `${CINEMM_ORIGIN}/?search=${encodeURIComponent(name ?? '')}&type=series`,
+      }
     }
   }
 
@@ -556,6 +683,16 @@ export async function getEpisodeServers(
       const retry = await callAction(ACTIONS.getEpisodeServers, [episodeId, source])
       lines = retry.lines
       raw = retry.lines.get('1')
+      topUpPoolInBackground()
+    } else {
+      // Pool drained AND IP is rate-limited. Surface a clearer error.
+      return {
+        episodeId,
+        servers: [],
+        remaining: 0,
+        error: 'IP_RATE_LIMITED',
+        fetchedAt: new Date().toISOString(),
+      }
     }
   }
 
