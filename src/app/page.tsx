@@ -441,12 +441,12 @@ export default function Home() {
         )}
 
         {loading && (
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
-            {Array.from({ length: 12 }).map((_, i) => (
+          <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-7 xl:grid-cols-8 gap-2 sm:gap-3 md:gap-4">
+            {Array.from({ length: 16 }).map((_, i) => (
               <Card key={i} className="bg-zinc-900 border-zinc-800 overflow-hidden p-0">
                 <Skeleton className="aspect-[2/3] rounded-none bg-zinc-800" />
-                <div className="p-3 space-y-2">
-                  <Skeleton className="h-4 w-3/4 bg-zinc-800" />
+                <div className="p-2 sm:p-3 space-y-1.5">
+                  <Skeleton className="h-3 sm:h-4 w-3/4 bg-zinc-800" />
                   <Skeleton className="h-3 w-1/3 bg-zinc-800" />
                 </div>
               </Card>
@@ -467,7 +467,7 @@ export default function Home() {
             <div className="text-sm text-zinc-400 mb-4">
               {results.length} result{results.length === 1 ? '' : 's'} for <span className="text-zinc-200 font-medium">&ldquo;{query}&rdquo;</span>
             </div>
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
+            <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-7 xl:grid-cols-8 gap-2 sm:gap-3 md:gap-4">
               {results.map((item) => (
                 <ResultCard key={`${item.type}-${item.id}`} item={item} onClick={() => openDetails(item)} />
               ))}
@@ -595,7 +595,7 @@ function ResultCard({ item, onClick }: { item: SearchItem; onClick: () => void }
   return (
     <button
       onClick={onClick}
-      className="group text-left rounded-lg overflow-hidden border border-zinc-800 bg-zinc-900 hover:border-purple-600 hover:ring-2 hover:ring-purple-600/30 transition-all focus:outline-none focus:ring-2 focus:ring-purple-600"
+      className="group text-left rounded-md sm:rounded-lg overflow-hidden border border-zinc-800 bg-zinc-900 hover:border-purple-600 hover:ring-2 hover:ring-purple-600/30 transition-all focus:outline-none focus:ring-2 focus:ring-purple-600"
     >
       <div className="aspect-[2/3] bg-zinc-800 relative overflow-hidden">
         {item.poster ? (
@@ -610,19 +610,20 @@ function ResultCard({ item, onClick }: { item: SearchItem; onClick: () => void }
           />
         ) : (
           <div className="w-full h-full flex items-center justify-center text-zinc-600">
-            <Film className="w-8 h-8" />
+            <Film className="w-6 h-6 sm:w-8 sm:h-8" />
           </div>
         )}
-        <div className="absolute top-2 right-2">
-          <Badge variant="outline" className="bg-black/70 border-zinc-700 text-zinc-200 backdrop-blur-sm">
-            {item.type === 'movie' ? <Film className="w-3 h-3 mr-1" /> : <Tv className="w-3 h-3 mr-1" />}
-            {item.type}
+        {/* Type badge: small icon-only on mobile, with text on sm+ */}
+        <div className="absolute top-1 right-1 sm:top-2 sm:right-2">
+          <Badge variant="outline" className="bg-black/70 border-zinc-700 text-zinc-200 backdrop-blur-sm p-1 sm:p-0">
+            {item.type === 'movie' ? <Film className="w-2.5 h-2.5 sm:w-3 sm:h-3 sm:mr-1" /> : <Tv className="w-2.5 h-2.5 sm:w-3 sm:h-3 sm:mr-1" />}
+            <span className="hidden sm:inline">{item.type}</span>
           </Badge>
         </div>
       </div>
-      <div className="p-3">
-        <h3 className="font-medium text-sm leading-snug line-clamp-2 text-zinc-100">{item.name}</h3>
-        {item.year && <p className="text-xs text-zinc-500 mt-1">{item.year}</p>}
+      <div className="p-1.5 sm:p-3">
+        <h3 className="font-medium text-[11px] sm:text-sm leading-tight line-clamp-2 text-zinc-100">{item.name}</h3>
+        {item.year && <p className="text-[10px] sm:text-xs text-zinc-500 mt-0.5 sm:mt-1">{item.year}</p>}
       </div>
     </button>
   )
