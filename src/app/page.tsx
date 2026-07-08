@@ -354,12 +354,21 @@ export default function Home() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [uuidInput, setUuidInput] = useState('')
 
-  // Load UUID from localStorage on mount
+  // Remaining quota on cinemm.com (from the last detail/episode fetch).
+  // Persisted in localStorage so it survives page reloads.
+  const [remainingQuota, setRemainingQuota] = useState<number | null>(null)
+
+  // Load UUID + remaining quota from localStorage on mount
   useEffect(() => {
     const stored = window.localStorage.getItem('cinemm_visitor_uuid')
     if (stored) {
       setVisitorUuid(stored)
       setUuidInput(stored)
+    }
+    const storedQuota = window.localStorage.getItem('cinemm_remaining_quota')
+    if (storedQuota) {
+      const n = parseInt(storedQuota, 10)
+      if (Number.isFinite(n)) setRemainingQuota(n)
     }
   }, [])
 
@@ -381,8 +390,10 @@ export default function Home() {
 
   const clearVisitorUuid = useCallback(() => {
     window.localStorage.removeItem('cinemm_visitor_uuid')
+    window.localStorage.removeItem('cinemm_remaining_quota')
     setVisitorUuid(null)
     setUuidInput('')
+    setRemainingQuota(null)
     toast.info('UUID cleared — using auto-refresh mode')
   }, [])
 
@@ -452,16 +463,22 @@ export default function Home() {
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || `Failed (${res.status})`)
       setDetails(data as Details)
-      // Auto-expand first season for series
-      if ((data as Details).type === 'series' && (data as SeriesDetails).seasons.length > 0) {
-        setExpandedSeasons(new Set([(data as SeriesDetails).seasons[0].id]))
+      // Update remaining quota in header + localStorage
+      const fetched = data as Details
+      if (typeof fetched.remaining === 'number') {
+        setRemainingQuota(fetched.remaining)
+        window.localStorage.setItem('cinemm_remaining_quota', String(fetched.remaining))
       }
-      if ((data as Details).error === 'IP_RATE_LIMITED') {
+      // Auto-expand first season for series
+      if (fetched.type === 'series' && (fetched as SeriesDetails).seasons.length > 0) {
+        setExpandedSeasons(new Set([(fetched as SeriesDetails).seasons[0].id]))
+      }
+      if (fetched.error === 'IP_RATE_LIMITED') {
         toast.error('cinemm.com IP rate-limited. Try a VPN, switch network, or wait ~1 hour.', { duration: 8000 })
-      } else if ((data as Details).error === 'QUOTA_EXCEEDED') {
+      } else if (fetched.error === 'QUOTA_EXCEEDED') {
         toast.warning('cinemm.com quota exceeded — showing partial data. JSON download still works.')
-      } else if ((data as Details).error) {
-        toast.warning(`Could not fetch full details: ${(data as Details).error}`)
+      } else if (fetched.error) {
+        toast.warning(`Could not fetch full details: ${fetched.error}`)
       }
     } catch (err) {
       setDetailsError(err instanceof Error ? err.message : 'Failed to load details')
@@ -545,6 +562,11 @@ export default function Home() {
           toast.warning('cinemm.com quota exceeded — try again later', { id: `ep-${episodeId}` })
         } else {
           setEpisodeServers((prev) => new Map(prev).set(episodeId, data.servers))
+          // Update remaining quota in header
+          if (typeof data.remaining === 'number') {
+            setRemainingQuota(data.remaining)
+            window.localStorage.setItem('cinemm_remaining_quota', String(data.remaining))
+          }
         }
       } catch {
         setEpisodeServersError((prev) => new Set(prev).add(episodeId))
@@ -559,6 +581,7 @@ export default function Home() {
     },
     [episodeServers, episodeServersLoading, visitorUuid],
   )
+
 
   const handleDownloadJson = useCallback(() => {
     if (!selected) return
@@ -602,6 +625,21 @@ export default function Home() {
             {visitorUuid && (
               <Badge variant="outline" className="border-green-900/50 text-green-400 text-xs">
                 <KeyRound className="w-3 h-3 mr-1" /> UUID active
+              </Badge>
+            )}
+            {remainingQuota !== null && (
+              <Badge
+                variant="outline"
+                className={`text-xs ${
+                  remainingQuota > 3
+                    ? 'border-green-900/50 text-green-400'
+                    : remainingQuota > 0
+                      ? 'border-amber-900/50 text-amber-400'
+                      : 'border-red-900/50 text-red-400'
+                }`}
+                title="Remaining cinemm.com quota for this UUID"
+              >
+                Quota: {remainingQuota}
               </Badge>
             )}
             <Button
