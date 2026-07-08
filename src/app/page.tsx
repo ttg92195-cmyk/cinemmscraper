@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useCallback, useEffect, useMemo } from 'react'
-import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon } from 'lucide-react'
+import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
@@ -59,11 +59,48 @@ interface SeriesDetails {
   type: 'series'
   source: string
   overview: string
-  episodeImageUrls: string[]
+  seasons: Season[]
   remaining: number
   error?: string | null
   fetchedAt: string
   sourceUrl: string
+}
+
+interface Episode {
+  id: number
+  tv_show_id: number
+  season_id: number
+  season_number: number
+  season_name: string
+  tmdb_episode_id: number | null
+  previous_episode_id: number | null
+  next_episode_id: number | null
+  name: string
+  poster: string
+  episode_number: number
+  runtime: string
+  air_date: string
+  is_last_play: number
+  only_bioscope: number
+  is_exclusive: number
+  exclusive_text: string
+  mobile_exclusive_text: string
+  resume_time: string | null
+}
+
+interface Season {
+  id: number
+  name: string
+  is_end: number
+  episodes: Episode[]
+}
+
+interface EpisodeServers {
+  episodeId: number
+  servers: Server[]
+  remaining: number
+  error: string | null
+  fetchedAt: string
 }
 
 type Details = MovieDetails | SeriesDetails
@@ -76,7 +113,7 @@ function sanitizeFilename(name: string): string {
   return name.replace(/[^a-zA-Z0-9-_]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '')
 }
 
-function buildJsonPayload(item: SearchItem, details: Details | null) {
+function buildJsonPayload(item: SearchItem, details: Details | null, episodeServers?: Map<number, Server[]>) {
   return {
     source: 'cinemm.com',
     fetchedAt: details?.fetchedAt ?? new Date().toISOString(),
@@ -94,8 +131,28 @@ function buildJsonPayload(item: SearchItem, details: Details | null) {
       ? {
           overview: details.overview,
           ...(details.type === 'movie'
-            ? { servers: details.servers, serverCount: details.servers.length }
-            : { episodeImageUrls: details.episodeImageUrls, episodeImageCount: details.episodeImageUrls.length }),
+            ? {
+                servers: details.servers,
+                serverCount: details.servers.length,
+              }
+            : {
+                seasons: details.seasons.map((s) => ({
+                  id: s.id,
+                  name: s.name,
+                  is_end: s.is_end,
+                  episodeCount: s.episodes.length,
+                  episodes: s.episodes.map((e) => ({
+                    id: e.id,
+                    episode_number: e.episode_number,
+                    name: e.name,
+                    air_date: e.air_date,
+                    runtime: e.runtime,
+                    poster: e.poster,
+                    servers: episodeServers?.get(e.id) ?? [],
+                  })),
+                })),
+                seasonCount: details.seasons.length,
+              }),
           remaining: details.remaining,
           error: details.error,
           sourceUrl: details.sourceUrl,
@@ -135,6 +192,13 @@ export default function Home() {
   const [detailsError, setDetailsError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
 
+  // Series-only: per-episode server state
+  const [episodeServers, setEpisodeServers] = useState<Map<number, Server[]>>(new Map())
+  const [episodeServersLoading, setEpisodeServersLoading] = useState<Set<number>>(new Set())
+  const [episodeServersError, setEpisodeServersError] = useState<Set<number>>(new Set())
+  const [expandedSeasons, setExpandedSeasons] = useState<Set<number>>(new Set())
+  const [selectedEpisode, setSelectedEpisode] = useState<number | null>(null)
+
   const onSubmit = useCallback(
     async (e?: React.FormEvent) => {
       e?.preventDefault()
@@ -172,6 +236,11 @@ export default function Home() {
     setDetailsError(null)
     setDetailsLoading(true)
     setCopied(false)
+    setEpisodeServers(new Map())
+    setEpisodeServersLoading(new Set())
+    setEpisodeServersError(new Set())
+    setExpandedSeasons(new Set())
+    setSelectedEpisode(null)
     try {
       const url = new URL('/api/details', window.location.origin)
       url.searchParams.set('id', String(item.id))
@@ -184,6 +253,10 @@ export default function Home() {
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || `Failed (${res.status})`)
       setDetails(data as Details)
+      // Auto-expand first season for series
+      if ((data as Details).type === 'series' && (data as SeriesDetails).seasons.length > 0) {
+        setExpandedSeasons(new Set([(data as SeriesDetails).seasons[0].id]))
+      }
       if ((data as Details).error === 'QUOTA_EXCEEDED') {
         toast.warning('cinemm.com quota exceeded — showing partial data. JSON download still works.')
       } else if ((data as Details).error) {
@@ -202,20 +275,70 @@ export default function Home() {
     setDetails(null)
     setDetailsError(null)
     setCopied(false)
+    setEpisodeServers(new Map())
+    setEpisodeServersLoading(new Set())
+    setEpisodeServersError(new Set())
+    setExpandedSeasons(new Set())
+    setSelectedEpisode(null)
   }, [])
+
+  // Toggle a season's expanded/collapsed state
+  const toggleSeason = useCallback((seasonId: number) => {
+    setExpandedSeasons((prev) => {
+      const next = new Set(prev)
+      if (next.has(seasonId)) next.delete(seasonId)
+      else next.add(seasonId)
+      return next
+    })
+  }, [])
+
+  // Fetch servers for a single episode. Idempotent — if already loaded or
+  // currently loading, returns immediately.
+  const fetchEpisodeServers = useCallback(
+    async (episodeId: number, source: string) => {
+      if (episodeServers.has(episodeId) || episodeServersLoading.has(episodeId)) return
+      setEpisodeServersLoading((prev) => new Set(prev).add(episodeId))
+      setEpisodeServersError((prev) => {
+        const next = new Set(prev)
+        next.delete(episodeId)
+        return next
+      })
+      try {
+        const res = await fetch(`/api/episode-servers?episodeId=${episodeId}&source=${source}`)
+        const data: EpisodeServers = await res.json()
+        if (!res.ok) throw new Error((data as { error?: string }).error || `Failed (${res.status})`)
+        if (data.error === 'QUOTA_EXCEEDED') {
+          setEpisodeServersError((prev) => new Set(prev).add(episodeId))
+          toast.warning('cinemm.com quota exceeded — try again later', { id: `ep-${episodeId}` })
+        } else {
+          setEpisodeServers((prev) => new Map(prev).set(episodeId, data.servers))
+        }
+      } catch {
+        setEpisodeServersError((prev) => new Set(prev).add(episodeId))
+        toast.error('Failed to load episode servers')
+      } finally {
+        setEpisodeServersLoading((prev) => {
+          const next = new Set(prev)
+          next.delete(episodeId)
+          return next
+        })
+      }
+    },
+    [episodeServers, episodeServersLoading],
+  )
 
   const handleDownloadJson = useCallback(() => {
     if (!selected) return
-    const payload = buildJsonPayload(selected, details)
+    const payload = buildJsonPayload(selected, details, episodeServers)
     const name = sanitizeFilename(selected.name || `id-${selected.id}`)
     const year = selected.year || 'unknown'
     downloadJson(`${name}_${year}_${selected.type}_${selected.id}.json`, payload)
     toast.success('JSON downloaded')
-  }, [selected, details])
+  }, [selected, details, episodeServers])
 
   const handleCopyJson = useCallback(async () => {
     if (!selected) return
-    const payload = buildJsonPayload(selected, details)
+    const payload = buildJsonPayload(selected, details, episodeServers)
     try {
       await navigator.clipboard.writeText(JSON.stringify(payload, null, 2))
       setCopied(true)
@@ -409,7 +532,18 @@ export default function Home() {
             )}
 
             {!detailsLoading && !detailsError && details && (
-              <DetailsView item={selected!} details={details} />
+              <DetailsView
+                item={selected!}
+                details={details}
+                episodeServers={episodeServers}
+                episodeServersLoading={episodeServersLoading}
+                episodeServersError={episodeServersError}
+                expandedSeasons={expandedSeasons}
+                selectedEpisode={selectedEpisode}
+                onToggleSeason={toggleSeason}
+                onFetchEpisodeServers={fetchEpisodeServers}
+                onSelectEpisode={setSelectedEpisode}
+              />
             )}
           </ScrollArea>
 
@@ -498,12 +632,36 @@ function ResultCard({ item, onClick }: { item: SearchItem; onClick: () => void }
 // Details view (shown inside dialog body)
 // ---------------------------------------------------------------------------
 
-function DetailsView({ item, details }: { item: SearchItem; details: Details }) {
+interface DetailsViewProps {
+  item: SearchItem
+  details: Details
+  episodeServers: Map<number, Server[]>
+  episodeServersLoading: Set<number>
+  episodeServersError: Set<number>
+  expandedSeasons: Set<number>
+  selectedEpisode: number | null
+  onToggleSeason: (seasonId: number) => void
+  onFetchEpisodeServers: (episodeId: number, source: string) => void
+  onSelectEpisode: (episodeId: number | null) => void
+}
+
+function DetailsView({
+  item,
+  details,
+  episodeServers,
+  episodeServersLoading,
+  episodeServersError,
+  expandedSeasons,
+  selectedEpisode,
+  onToggleSeason,
+  onFetchEpisodeServers,
+  onSelectEpisode,
+}: DetailsViewProps) {
   const hasServers = details.type === 'movie' && details.servers.length > 0
-  const hasEpisodes = details.type === 'series' && details.episodeImageUrls.length > 0
+  const hasSeasons = details.type === 'series' && details.seasons.length > 0
   const hasOverview = !!details.overview
   const isQuotaExceeded = details.error === 'QUOTA_EXCEEDED'
-  const hasPartialInfo = !hasServers && !hasEpisodes && !hasOverview
+  const hasPartialInfo = !hasServers && !hasSeasons && !hasOverview
 
   return (
     <div className="space-y-5">
@@ -527,6 +685,11 @@ function DetailsView({ item, details }: { item: SearchItem; details: Details }) 
             <Badge variant="outline" className="border-zinc-700 text-zinc-300 capitalize">{item.type}</Badge>
             <Badge variant="outline" className="border-zinc-700 text-zinc-300">Source: {item.source}</Badge>
             {item.tmdbId && <Badge variant="outline" className="border-zinc-700 text-zinc-300">TMDB: {item.tmdbId}</Badge>}
+            {hasSeasons && (
+              <Badge variant="outline" className="border-zinc-700 text-zinc-300">
+                {(details as SeriesDetails).seasons.length} season{(details as SeriesDetails).seasons.length === 1 ? '' : 's'}
+              </Badge>
+            )}
           </div>
           {isQuotaExceeded && (
             <div className="mt-2 p-2 rounded border border-amber-900/50 bg-amber-950/30 text-amber-200 text-xs flex items-start gap-2">
@@ -534,8 +697,8 @@ function DetailsView({ item, details }: { item: SearchItem; details: Details }) 
               <div>
                 <div className="font-semibold">cinemm.com quota exceeded</div>
                 <div className="text-amber-300/80 mt-0.5">
-                  The source site limits detail fetches per IP (typically a few per day). The basic info below is still
-                  available, and you can download the partial JSON. Try again later or use a different network.
+                  The source site limits detail fetches per IP. The basic info below is still available, and you can
+                  download the partial JSON. Try again later or use a different network.
                 </div>
               </div>
             </div>
@@ -588,7 +751,7 @@ function DetailsView({ item, details }: { item: SearchItem; details: Details }) 
                   <span className="text-sm truncate">{s.name}</span>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
-                  {s.size && <Badge variant="outline" className="border-zinc-700 text-zinc-400 text-xs">{s.size}</Badge>}
+                  {s.size && s.size !== 'N/A' && <Badge variant="outline" className="border-zinc-700 text-zinc-400 text-xs">{s.size}</Badge>}
                   <ExternalLink className="w-3 h-3 text-zinc-600 group-hover:text-purple-400" />
                 </div>
               </a>
@@ -597,29 +760,69 @@ function DetailsView({ item, details }: { item: SearchItem; details: Details }) 
         </section>
       )}
 
-      {/* Episode thumbnails (series) */}
-      {hasEpisodes && (
+      {/* Seasons/episodes tree (series) */}
+      {hasSeasons && (
         <section>
           <h3 className="text-sm font-semibold text-zinc-200 mb-2 flex items-center gap-2">
-            <ImageIcon className="w-4 h-4" /> Episode Images
+            <Tv className="w-4 h-4" /> Seasons &amp; Episodes
             <Badge variant="outline" className="border-zinc-700 text-zinc-400 ml-1">
-              {(details as SeriesDetails).episodeImageUrls.length}
+              {(details as SeriesDetails).seasons.reduce((acc, s) => acc + s.episodes.length, 0)} episodes
             </Badge>
           </h3>
-          <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-2 max-h-72 overflow-y-auto p-1">
-            {(details as SeriesDetails).episodeImageUrls.slice(0, 30).map((url, i) => (
-              <img
-                key={i}
-                src={url}
-                alt={`Episode ${i + 1}`}
-                loading="lazy"
-                className="aspect-video w-full object-cover rounded border border-zinc-800 hover:border-purple-600/50"
-                onError={(e) => {
-                  ;(e.target as HTMLImageElement).style.display = 'none'
-                }}
-              />
-            ))}
+          <div className="space-y-1.5 max-h-[28rem] overflow-y-auto pr-1">
+            {(details as SeriesDetails).seasons.map((season) => {
+              const isExpanded = expandedSeasons.has(season.id)
+              return (
+                <div key={season.id} className="rounded-md border border-zinc-800 bg-zinc-900/60 overflow-hidden">
+                  <button
+                    onClick={() => onToggleSeason(season.id)}
+                    className="w-full flex items-center justify-between gap-2 px-3 py-2.5 hover:bg-zinc-800/60 transition-colors text-left"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <ChevronRight
+                        className={`w-4 h-4 text-zinc-400 transition-transform shrink-0 ${isExpanded ? 'rotate-90' : ''}`}
+                      />
+                      <span className="font-medium text-sm text-zinc-100">{season.name}</span>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <Badge variant="outline" className="border-zinc-700 text-zinc-400 text-xs">
+                        {season.episodes.length} ep{season.episodes.length === 1 ? '' : 's'}
+                      </Badge>
+                      {season.is_end === 1 && (
+                        <Badge variant="outline" className="border-green-900/50 text-green-400 text-xs">Ended</Badge>
+                      )}
+                    </div>
+                  </button>
+                  {isExpanded && (
+                    <div className="border-t border-zinc-800 divide-y divide-zinc-800/60">
+                      {season.episodes.map((ep) => (
+                        <EpisodeRow
+                          key={ep.id}
+                          episode={ep}
+                          source={item.source}
+                          isSelected={selectedEpisode === ep.id}
+                          servers={episodeServers.get(ep.id)}
+                          isLoading={episodeServersLoading.has(ep.id)}
+                          hasError={episodeServersError.has(ep.id)}
+                          onClick={() => {
+                            if (selectedEpisode === ep.id) {
+                              onSelectEpisode(null)
+                            } else {
+                              onSelectEpisode(ep.id)
+                              onFetchEpisodeServers(ep.id, item.source)
+                            }
+                          }}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
           </div>
+          <p className="text-xs text-zinc-500 mt-2">
+            Click an episode to fetch its streaming/download servers. Servers are cached after the first fetch.
+          </p>
         </section>
       )}
 
@@ -639,6 +842,111 @@ function DetailsView({ item, details }: { item: SearchItem; details: Details }) 
       {hasPartialInfo && !isQuotaExceeded && !details.error && (
         <div className="text-center py-8 text-zinc-500 text-sm">
           No detailed content available for this item. You can still download the basic info as JSON.
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Episode row (inside season)
+// ---------------------------------------------------------------------------
+
+interface EpisodeRowProps {
+  episode: Episode
+  source: string
+  isSelected: boolean
+  servers?: Server[]
+  isLoading: boolean
+  hasError: boolean
+  onClick: () => void
+}
+
+function EpisodeRow({ episode, isSelected, servers, isLoading, hasError, onClick }: EpisodeRowProps) {
+  return (
+    <div>
+      <button
+        onClick={onClick}
+        className={`w-full flex items-center gap-3 px-3 py-2 hover:bg-zinc-800/60 transition-colors text-left ${
+          isSelected ? 'bg-purple-950/30' : ''
+        }`}
+      >
+        <div className="w-16 h-10 rounded overflow-hidden bg-zinc-800 shrink-0">
+          {episode.poster ? (
+            <img
+              src={episode.poster}
+              alt={`Episode ${episode.episode_number}`}
+              loading="lazy"
+              className="w-full h-full object-cover"
+              onError={(e) => {
+                ;(e.target as HTMLImageElement).style.display = 'none'
+              }}
+            />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center text-zinc-600">
+              <Tv className="w-3 h-3" />
+            </div>
+          )}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-mono text-zinc-500 shrink-0">E{String(episode.episode_number).padStart(2, '0')}</span>
+            <span className="text-sm font-medium text-zinc-100 truncate">{episode.name || `Episode ${episode.episode_number}`}</span>
+          </div>
+          <div className="flex items-center gap-2 text-xs text-zinc-500 mt-0.5">
+            {episode.air_date && <span>{episode.air_date}</span>}
+            {episode.runtime && <span>· {episode.runtime}</span>}
+            {episode.is_exclusive === 1 && <Badge variant="outline" className="border-amber-900/50 text-amber-400 text-[10px] px-1 py-0">Exclusive</Badge>}
+          </div>
+        </div>
+        <div className="shrink-0">
+          {isLoading ? (
+            <Loader2 className="w-4 h-4 text-purple-400 animate-spin" />
+          ) : hasError ? (
+            <AlertTriangle className="w-4 h-4 text-amber-400" />
+          ) : servers && servers.length > 0 ? (
+            <Badge variant="outline" className="border-purple-900/50 text-purple-400 text-xs">
+              {servers.length}
+            </Badge>
+          ) : (
+            <ChevronRight className={`w-4 h-4 text-zinc-500 transition-transform ${isSelected ? 'rotate-90' : ''}`} />
+          )}
+        </div>
+      </button>
+      {isSelected && (
+        <div className="px-3 pb-3 pt-1 bg-zinc-950/40">
+          {isLoading ? (
+            <div className="flex items-center gap-2 text-xs text-zinc-400 py-2">
+              <Loader2 className="w-3 h-3 animate-spin" /> Loading servers from cinemm.com...
+            </div>
+          ) : hasError ? (
+            <div className="text-xs text-amber-400 py-2 flex items-center gap-2">
+              <AlertTriangle className="w-3 h-3" /> Failed to load (quota may be exceeded). Try again later.
+            </div>
+          ) : servers && servers.length > 0 ? (
+            <div className="space-y-1">
+              {servers.map((s, i) => (
+                <a
+                  key={i}
+                  href={s.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded border border-zinc-800 bg-zinc-900/60 hover:bg-zinc-800/60 hover:border-purple-600/50 transition-colors group"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Download className="w-3 h-3 text-zinc-500 group-hover:text-purple-400 shrink-0" />
+                    <span className="text-xs truncate">{s.name}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {s.size && s.size !== 'N/A' && <Badge variant="outline" className="border-zinc-700 text-zinc-400 text-[10px] px-1">{s.size}</Badge>}
+                    <ExternalLink className="w-2.5 h-2.5 text-zinc-600 group-hover:text-purple-400" />
+                  </div>
+                </a>
+              ))}
+            </div>
+          ) : (
+            <div className="text-xs text-zinc-500 py-2">No servers available for this episode.</div>
+          )}
         </div>
       )}
     </div>

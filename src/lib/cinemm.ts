@@ -60,8 +60,50 @@ export interface CinemmSearchItem {
 
 export interface CinemmServer {
   name: string
-  size: string
+  size: string  // 'N/A' when source returns null
   url: string
+}
+
+/** A single episode inside a season (returned by getSeriesDetails). */
+export interface CinemmEpisode {
+  id: number
+  tv_show_id: number
+  season_id: number
+  season_number: number
+  season_name: string
+  tmdb_episode_id: number | null
+  previous_episode_id: number | null
+  next_episode_id: number | null
+  name: string
+  poster: string
+  episode_number: number
+  runtime: string
+  air_date: string
+  is_last_play: number
+  only_bioscope: number
+  is_exclusive: number
+  exclusive_text: string
+  mobile_exclusive_text: string
+  resume_time: string | null
+  tvshow_streaming_links: unknown[]
+  tvshow_download_links: unknown[]
+}
+
+/** A season inside a series (returned by getSeriesDetails). */
+export interface CinemmSeason {
+  id: number
+  name: string
+  is_end: number
+  episodes: CinemmEpisode[]
+}
+
+/** Episode servers (returned by getEpisodeServers). */
+export interface CinemmEpisodeDetails {
+  episodeId: number
+  servers: CinemmServer[]
+  remaining: number
+  error: string | null
+  fetchedAt: string
 }
 
 export interface CinemmMovieDetails {
@@ -87,7 +129,7 @@ export interface CinemmSeriesDetails {
   type: 'series'
   source: string
   overview: string
-  episodeImageUrls: string[]
+  seasons: CinemmSeason[]
   remaining: number
   error?: string | null
   fetchedAt: string
@@ -118,11 +160,6 @@ export type CinemmDetails = CinemmMovieDetails | CinemmSeriesDetails
 // and split it out as a separate line entry.
 
 const LINE_START_RE = /^([0-9a-f]+):(T[0-9a-f]+,)?/
-// Detects "<hex>:{<json>}" pattern that may be glued to the end of a text chunk.
-// We require the char BEFORE the hex id to be non-newline and non-hex (to avoid
-// matching things like "abc1:..." inside normal text). The hex id must be 1-3
-// chars (RSC ids are short) and immediately followed by ":" and "{".
-const GLUED_JSON_RE = /(?:^|[^\n0-9a-f])([0-9a-f]{1,3}):(\{.*\})$/s
 
 function parseRsc(text: string): Map<string, string> {
   const result = new Map<string, string>()
@@ -150,19 +187,30 @@ function parseRsc(text: string): Map<string, string> {
         i++
       }
       // Check for a glued JSON return value at the end of the text.
-      // Example: "Some text...1:{\"servers\":[...]}"
-      const glued = payload.match(GLUED_JSON_RE)
-      if (glued) {
-        const gluedId = glued[1]
-        const gluedJson = glued[2]
-        // Strip the glued JSON (and the preceding hex id) from the text payload.
-        // Find the position where the glued id starts.
-        const idPos = payload.lastIndexOf(gluedId + ':')
-        if (idPos > 0) {
-          // Also strip the hex id itself
-          payload = payload.substring(0, idPos)
+      // The action's return value always lives on RSC line "1:".
+      // We look for "1:{" patterns in the payload. To distinguish a real
+      // RSC line "1:" from a coincidental "1:" inside text content (like
+      // "Drama1:" or "Step1:"), we require that the JSON after "1:{" must
+      // be valid (parseable) and span to the end of the payload.
+      const markerStr = '1:{'
+      let searchFrom = payload.length
+      while (true) {
+        const markerPos = payload.lastIndexOf(markerStr, searchFrom)
+        if (markerPos <= 0) break
+        const afterMarker = payload.substring(markerPos + markerStr.length)
+        if (afterMarker.endsWith('}')) {
+          const candidateJson = '{' + afterMarker
+          try {
+            JSON.parse(candidateJson)
+            // Valid JSON found — this is the glued return value.
+            payload = payload.substring(0, markerPos)
+            result.set('1', candidateJson)
+            break
+          } catch {
+            // Not valid JSON, keep searching backwards.
+          }
         }
-        result.set(gluedId, gluedJson)
+        searchFrom = markerPos - 1
       }
     } else {
       i++
@@ -357,7 +405,10 @@ export async function getMovieDetails(
         error?: string
         overview?: string
       }
-      servers = parsed.servers ?? []
+      servers = (parsed.servers ?? []).map((s) => ({
+        ...s,
+        size: s.size ?? 'N/A',
+      }))
       remaining = parsed.remaining ?? 0
       error = parsed.error ?? null
       // Overview is a reference like "$10" pointing to the text chunk on line 10
@@ -423,6 +474,10 @@ export async function getSeriesDetails(
   // Strip "T<hex>," prefix if still attached
   const tMatch = overview.match(/^T[0-9a-f]+,(.*)$/s)
   if (tMatch) overview = tMatch[1]
+  // The seasons JSON return value (line "1:") is glued to the end of the
+  // overview text by cinemm.com's buggy RSC serializer. The parser should
+  // already have split it into line "1:" — but double-check in case.
+  let seasonsJson = lines.get('1') ?? ''
 
   // If we got an empty overview (likely QUOTA_EXCEEDED), try refreshing quota.
   if (!overview) {
@@ -433,17 +488,19 @@ export async function getSeriesDetails(
       overview = retry.lines.get('10') ?? ''
       const tRetry = overview.match(/^T[0-9a-f]+,(.*)$/s)
       if (tRetry) overview = tRetry[1]
+      seasonsJson = retry.lines.get('1') ?? ''
     }
   }
 
-  // Extract episode image URLs from overview text
-  const episodeImageUrls: string[] = []
-  if (overview) {
-    const matches = overview.match(/https?:\/\/[^\s"'`<>\]\)]+/g) || []
-    for (const url of matches) {
-      if (url.includes('tmdb.org') || url.includes('image.tmdb')) {
-        episodeImageUrls.push(url)
-      }
+  // Parse seasons structure from the JSON return value on line "1:".
+  // The action returns: { seasons: [...], overview: "$<refId>" }
+  let seasons: CinemmSeason[] = []
+  if (seasonsJson) {
+    try {
+      const parsed = JSON.parse(seasonsJson) as { seasons?: CinemmSeason[] }
+      seasons = parsed.seasons ?? []
+    } catch (e) {
+      console.error('Failed to parse seasons JSON:', e)
     }
   }
 
@@ -455,7 +512,7 @@ export async function getSeriesDetails(
     if (m) remaining = parseInt(m[1], 10)
   }
 
-  const error = overview ? null : 'NO_OVERVIEW'
+  const error = overview || seasons.length > 0 ? null : 'NO_OVERVIEW'
 
   const result: CinemmSeriesDetails = {
     id,
@@ -465,13 +522,76 @@ export async function getSeriesDetails(
     type: 'series',
     source,
     overview,
-    episodeImageUrls: [...new Set(episodeImageUrls)],
+    seasons,
     remaining,
     error,
     fetchedAt: new Date().toISOString(),
     sourceUrl: `${CINEMM_ORIGIN}/?search=${encodeURIComponent(name ?? '')}&type=series`,
   }
-  if (overview) await setCached(key, result)
+  if (overview || seasons.length > 0) await setCached(key, result)
+  return result
+}
+
+/**
+ * Fetch streaming/download servers for a single episode.
+ * Args: (episodeId, source). Quota-limited — uses caching.
+ */
+export async function getEpisodeServers(
+  episodeId: number,
+  source: string,
+  opts: { useCache?: boolean } = {},
+): Promise<CinemmEpisodeDetails> {
+  const key = `episode:${episodeId}:${source}`
+  if (opts.useCache !== false) {
+    const cached = await getCached<CinemmEpisodeDetails>(key)
+    if (cached && cached.servers.length > 0) return cached
+  }
+
+  let { lines } = await callAction(ACTIONS.getEpisodeServers, [episodeId, source])
+  let raw = lines.get('1')
+  // If QUOTA_EXCEEDED, refresh visitor and retry once.
+  if (raw && JSON.parse(raw).error === 'QUOTA_EXCEEDED') {
+    const refreshed = await refreshVisitorQuota()
+    if (refreshed && refreshed.remaining > 0) {
+      const retry = await callAction(ACTIONS.getEpisodeServers, [episodeId, source])
+      lines = retry.lines
+      raw = retry.lines.get('1')
+    }
+  }
+
+  let servers: CinemmServer[] = []
+  let remaining = 0
+  let error: string | null = null
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as {
+        servers?: CinemmServer[]
+        remaining?: number
+        error?: string
+      }
+      servers = (parsed.servers ?? []).map((s) => ({
+        ...s,
+        // Normalize size: server returns null when unknown
+        size: s.size ?? 'N/A',
+      }))
+      remaining = parsed.remaining ?? 0
+      error = parsed.error ?? null
+    } catch (e) {
+      console.error('Failed to parse episode servers JSON:', e)
+      error = 'PARSE_ERROR'
+    }
+  } else {
+    error = 'NO_RETURN_VALUE'
+  }
+
+  const result: CinemmEpisodeDetails = {
+    episodeId,
+    servers,
+    remaining,
+    error,
+    fetchedAt: new Date().toISOString(),
+  }
+  if (!error && servers.length > 0) await setCached(key, result)
   return result
 }
 
