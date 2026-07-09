@@ -347,23 +347,44 @@ export default function Home() {
   const [expandedSeasons, setExpandedSeasons] = useState<Set<number>>(new Set())
   const [selectedEpisode, setSelectedEpisode] = useState<number | null>(null)
 
-  // User-supplied cinemm.com visitor UUID (from localStorage). When present,
-  // requests use this UUID directly via the user_uuid cookie — bypassing the
-  // auto-refresh path and its IP rate-limiting side effects.
-  const [visitorUuid, setVisitorUuid] = useState<string | null>(null)
+  // User-supplied cinemm.com visitor UUIDs (from localStorage). When present,
+  // requests use the active UUID directly via the user_uuid cookie — bypassing
+  // the auto-refresh path and its IP rate-limiting side effects.
+  //
+  // Multiple UUIDs can be stored. When the active UUID's quota is exhausted,
+  // we auto-rotate to the next UUID with remaining quota.
+  const [visitorUuids, setVisitorUuids] = useState<string[]>([])
+  const [activeUuidIndex, setActiveUuidIndex] = useState(0)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [uuidInput, setUuidInput] = useState('')
 
   // Remaining quota on cinemm.com (from the last detail/episode fetch).
-  // Persisted in localStorage so it survives page reloads.
+  // Persisted per-UUID in localStorage so it survives page reloads.
   const [remainingQuota, setRemainingQuota] = useState<number | null>(null)
 
-  // Load UUID + remaining quota from localStorage on mount
+  // The active UUID — derived from visitorUuids + activeUuidIndex
+  const visitorUuid = visitorUuids[activeUuidIndex] ?? null
+
+  // Load UUIDs + remaining quota from localStorage on mount
   useEffect(() => {
-    const stored = window.localStorage.getItem('cinemm_visitor_uuid')
+    const stored = window.localStorage.getItem('cinemm_visitor_uuids')
     if (stored) {
-      setVisitorUuid(stored)
-      setUuidInput(stored)
+      try {
+        const arr = JSON.parse(stored) as string[]
+        if (Array.isArray(arr) && arr.length > 0) {
+          setVisitorUuids(arr)
+        }
+      } catch {
+        // Old single-UUID format — migrate
+        setVisitorUuids([stored])
+      }
+    } else {
+      // Migrate old single-UUID format if present
+      const oldSingle = window.localStorage.getItem('cinemm_visitor_uuid')
+      if (oldSingle) {
+        setVisitorUuids([oldSingle])
+        window.localStorage.setItem('cinemm_visitor_uuids', JSON.stringify([oldSingle]))
+      }
     }
     const storedQuota = window.localStorage.getItem('cinemm_remaining_quota')
     if (storedQuota) {
@@ -372,29 +393,64 @@ export default function Home() {
     }
   }, [])
 
-  const saveVisitorUuid = useCallback(() => {
-    const trimmed = uuidInput.trim()
-    if (trimmed) {
-      window.localStorage.setItem('cinemm_visitor_uuid', trimmed)
-      setVisitorUuid(trimmed)
-      toast.success('UUID saved — will be used for all detail fetches')
-      setSettingsOpen(false)
+  // Persist UUIDs to localStorage whenever they change
+  useEffect(() => {
+    if (visitorUuids.length > 0) {
+      window.localStorage.setItem('cinemm_visitor_uuids', JSON.stringify(visitorUuids))
     } else {
-      // Empty input = clear
-      window.localStorage.removeItem('cinemm_visitor_uuid')
-      setVisitorUuid(null)
-      toast.info('UUID cleared — using auto-refresh mode')
-      setSettingsOpen(false)
+      window.localStorage.removeItem('cinemm_visitor_uuids')
     }
-  }, [uuidInput])
+  }, [visitorUuids])
 
-  const clearVisitorUuid = useCallback(() => {
-    window.localStorage.removeItem('cinemm_visitor_uuid')
-    window.localStorage.removeItem('cinemm_remaining_quota')
-    setVisitorUuid(null)
+  // Ensure activeUuidIndex is in bounds
+  useEffect(() => {
+    if (activeUuidIndex >= visitorUuids.length) {
+      setActiveUuidIndex(Math.max(0, visitorUuids.length - 1))
+    }
+  }, [activeUuidIndex, visitorUuids.length])
+
+  const addVisitorUuid = useCallback(() => {
+    const trimmed = uuidInput.trim()
+    if (!trimmed) return
+    if (visitorUuids.includes(trimmed)) {
+      toast.error('This UUID is already in the list')
+      return
+    }
+    setVisitorUuids((prev) => [...prev, trimmed])
     setUuidInput('')
+    toast.success(`UUID added (${visitorUuids.length + 1} total)`)
+  }, [uuidInput, visitorUuids])
+
+  const removeVisitorUuid = useCallback(
+    (index: number) => {
+      setVisitorUuids((prev) => prev.filter((_, i) => i !== index))
+      if (index === activeUuidIndex) {
+        setActiveUuidIndex(0)
+        setRemainingQuota(null)
+        window.localStorage.removeItem('cinemm_remaining_quota')
+      }
+      toast.info(`UUID removed (${Math.max(0, visitorUuids.length - 1)} remaining)`)
+    },
+    [activeUuidIndex, visitorUuids.length],
+  )
+
+  const setActiveUuid = useCallback(
+    (index: number) => {
+      setActiveUuidIndex(index)
+      setRemainingQuota(null)
+      window.localStorage.removeItem('cinemm_remaining_quota')
+      toast.info(`Switched to UUID #${index + 1}`)
+    },
+    [],
+  )
+
+  const clearAllUuids = useCallback(() => {
+    setVisitorUuids([])
+    setActiveUuidIndex(0)
     setRemainingQuota(null)
-    toast.info('UUID cleared — using auto-refresh mode')
+    window.localStorage.removeItem('cinemm_visitor_uuids')
+    window.localStorage.removeItem('cinemm_remaining_quota')
+    toast.info('All UUIDs cleared — using auto-refresh mode')
   }, [])
 
   const onSubmit = useCallback(
@@ -459,12 +515,44 @@ export default function Home() {
       url.searchParams.set('year', item.year)
       url.searchParams.set('poster', item.poster)
       if (visitorUuid) url.searchParams.set('uuid', visitorUuid)
-      const res = await fetch(url.toString())
-      const data = await res.json()
+      let res = await fetch(url.toString())
+      let data = await res.json()
       if (!res.ok) throw new Error(data.error || `Failed (${res.status})`)
-      setDetails(data as Details)
+      let fetched = data as Details
+
+      // Auto-rotate UUID on QUOTA_EXCEEDED: if the active UUID is exhausted,
+      // try the next UUID in the list. Repeat until one works or all fail.
+      if (
+        fetched.error === 'QUOTA_EXCEEDED' &&
+        visitorUuid &&
+        visitorUuids.length > 1
+      ) {
+        const currentIndex = activeUuidIndex
+        for (let offset = 1; offset < visitorUuids.length; offset++) {
+          const nextIndex = (currentIndex + offset) % visitorUuids.length
+          const nextUuid = visitorUuids[nextIndex]
+          const retryUrl = new URL(url.toString())
+          retryUrl.searchParams.set('uuid', nextUuid)
+          const retryRes = await fetch(retryUrl.toString())
+          const retryData = await retryRes.json()
+          if (!retryRes.ok) continue
+          const retryFetched = retryData as Details
+          // Success if we got servers or overview or seasons
+          const hasContent =
+            (retryFetched.type === 'movie' && (retryFetched as MovieDetails).servers.length > 0) ||
+            (retryFetched.type === 'series' && (retryFetched as SeriesDetails).seasons.length > 0) ||
+            retryFetched.overview.length > 0
+          if (hasContent) {
+            setActiveUuidIndex(nextIndex)
+            fetched = retryFetched
+            toast.success(`Switched to UUID #${nextIndex + 1} (quota was exhausted on #${currentIndex + 1})`)
+            break
+          }
+        }
+      }
+
+      setDetails(fetched)
       // Update remaining quota in header + localStorage
-      const fetched = data as Details
       if (typeof fetched.remaining === 'number') {
         setRemainingQuota(fetched.remaining)
         window.localStorage.setItem('cinemm_remaining_quota', String(fetched.remaining))
@@ -486,7 +574,7 @@ export default function Home() {
     } finally {
       setDetailsLoading(false)
     }
-  }, [visitorUuid])
+  }, [visitorUuid, visitorUuids, activeUuidIndex])
 
   const closeDetails = useCallback(() => {
     // Pop the URL state we pushed in openDetails so the browser back button
@@ -624,7 +712,9 @@ export default function Home() {
           <div className="flex items-center gap-3">
             {visitorUuid && (
               <Badge variant="outline" className="border-green-900/50 text-green-400 text-xs">
-                <KeyRound className="w-3 h-3 mr-1" /> UUID active
+                <KeyRound className="w-3 h-3 mr-1" />
+                UUID #{activeUuidIndex + 1}
+                {visitorUuids.length > 1 && <span className="text-zinc-500 ml-1">/ {visitorUuids.length}</span>}
               </Badge>
             )}
             {remainingQuota !== null && (
@@ -637,7 +727,7 @@ export default function Home() {
                       ? 'border-amber-900/50 text-amber-400'
                       : 'border-red-900/50 text-red-400'
                 }`}
-                title="Remaining cinemm.com quota for this UUID"
+                title="Remaining cinemm.com quota for the active UUID"
               >
                 Quota: {remainingQuota}
               </Badge>
@@ -666,49 +756,110 @@ export default function Home() {
         {settingsOpen && (
           <div className="border-t border-zinc-800 bg-zinc-900/80 px-4 py-4">
             <div className="container mx-auto max-w-3xl space-y-3">
-              <div className="flex items-center gap-2">
-                <KeyRound className="w-4 h-4 text-purple-400" />
-                <h3 className="text-sm font-semibold text-zinc-100">cinemm.com Visitor UUID</h3>
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <KeyRound className="w-4 h-4 text-purple-400" />
+                  <h3 className="text-sm font-semibold text-zinc-100">cinemm.com Visitor UUIDs</h3>
+                  {visitorUuids.length > 0 && (
+                    <Badge variant="outline" className="border-zinc-700 text-zinc-300 text-xs">
+                      {visitorUuids.length} saved
+                    </Badge>
+                  )}
+                </div>
+                {visitorUuids.length > 0 && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={clearAllUuids}
+                    className="bg-zinc-900 border-zinc-700 hover:bg-zinc-800 text-zinc-100 text-xs"
+                  >
+                    Clear all
+                  </Button>
+                )}
               </div>
               <p className="text-xs text-zinc-400 leading-relaxed">
-                Paste your cinemm.com visitor UUID here to use it directly for all detail fetches.
-                This bypasses the auto-refresh logic (and its IP rate-limiting side effects).
-                Visit{' '}
+                Add multiple cinemm.com visitor UUIDs. When the active UUID&apos;s quota is exhausted,
+                the app auto-rotates to the next UUID. Visit{' '}
                 <a href="https://cinemm.com" target="_blank" rel="noopener noreferrer" className="text-purple-400 hover:text-purple-300 underline">
                   cinemm.com
                 </a>{' '}
-                → open browser DevTools (F12) → Application → Cookies → copy the value of{' '}
+                → DevTools (F12) → Application → Cookies → copy{' '}
                 <code className="px-1 py-0.5 bg-zinc-800 rounded text-zinc-200">user_uuid</code>.
               </p>
               <div className="flex gap-2">
                 <Input
                   type="text"
-                  placeholder="e.g. a9e6035a-33e9-4b72-bd66-0a3493533018"
+                  placeholder="Paste a UUID, e.g. a9e6035a-33e9-4b72-bd66-0a3493533018"
                   value={uuidInput}
                   onChange={(e) => setUuidInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addVisitorUuid() } }}
                   className="bg-zinc-950 border-zinc-700 text-zinc-100 placeholder:text-zinc-600 focus-visible:ring-purple-500 font-mono text-sm"
                 />
                 <Button
                   size="sm"
-                  onClick={saveVisitorUuid}
+                  onClick={addVisitorUuid}
+                  disabled={!uuidInput.trim()}
                   className="bg-purple-600 hover:bg-purple-700 text-white"
                 >
-                  Save
+                  Add
                 </Button>
-                {visitorUuid && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={clearVisitorUuid}
-                    className="bg-zinc-900 border-zinc-700 hover:bg-zinc-800 text-zinc-100"
-                  >
-                    Clear
-                  </Button>
-                )}
               </div>
+              {visitorUuids.length > 0 && (
+                <div className="space-y-1.5">
+                  {visitorUuids.map((uuid, i) => (
+                    <div
+                      key={`${uuid}-${i}`}
+                      className={`flex items-center gap-2 px-3 py-2 rounded-md border ${
+                        i === activeUuidIndex
+                          ? 'border-purple-600 bg-purple-950/30'
+                          : 'border-zinc-800 bg-zinc-950/60'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2 flex-1 min-w-0">
+                        {i === activeUuidIndex ? (
+                          <span className="w-2 h-2 rounded-full bg-purple-400 shrink-0" />
+                        ) : (
+                          <span className="w-2 h-2 rounded-full bg-zinc-600 shrink-0" />
+                        )}
+                        <span className="text-xs font-mono text-zinc-200 truncate">
+                          {uuid.length > 36 ? uuid.substring(0, 36) + '...' : uuid}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <span className="text-xs text-zinc-500 mr-1">#{i + 1}</span>
+                        {i !== activeUuidIndex && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setActiveUuid(i)}
+                            className="h-6 px-2 text-xs text-zinc-400 hover:text-zinc-100"
+                          >
+                            Use
+                          </Button>
+                        )}
+                        {i === activeUuidIndex && (
+                          <Badge variant="outline" className="border-purple-900/50 text-purple-400 text-[10px] px-1 py-0">
+                            active
+                          </Badge>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => removeVisitorUuid(i)}
+                          className="h-6 px-2 text-xs text-red-400 hover:text-red-300"
+                        >
+                          <X className="w-3 h-3" />
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
               <p className="text-xs text-zinc-500">
                 Status: {visitorUuid ? (
-                  <span className="text-green-400">UUID active — direct mode (no auto-refresh)</span>
+                  <span className="text-green-400">
+                    UUID #{activeUuidIndex + 1} active — direct mode (auto-rotate on quota exceeded)
+                  </span>
                 ) : (
                   <span className="text-zinc-400">No UUID — auto-refresh mode (IP rate-limited)</span>
                 )}
