@@ -236,10 +236,13 @@ function buildJsonPayload(
   episodeServers?: Map<number, Server[]>,
   manualDownloadLinks: ParsedDownloadLink[] = [],
   manualWatchLinks: ParsedWatchLink[] = [],
+  resolvedTmdbId: number | null = null,
 ) {
   const overview = details?.overview ?? ''
   const metadata = parseOverviewMetadata(overview)
-  const tmdbId = item.tmdbId ? Number(item.tmdbId) : null
+  // Prefer the TMDB ID resolved via the TMDB API lookup; fall back to whatever
+  // cinemm.com gave us (usually null for movies/series top-level).
+  const tmdbId = resolvedTmdbId ?? (item.tmdbId ? Number(item.tmdbId) : null)
 
   let movieEntry: Record<string, unknown>
 
@@ -357,6 +360,16 @@ export default function Home() {
   const [manualDownloadLinks, setManualDownloadLinks] = useState<ParsedDownloadLink[]>([])
   const [manualWatchLinks, setManualWatchLinks] = useState<ParsedWatchLink[]>([])
 
+  // User-supplied TMDB API key (from localStorage). Used to look up the
+  // real TMDB movie/series ID by name + year. Cached in SQLite.
+  const [tmdbApiKey, setTmdbApiKey] = useState<string | null>(null)
+  const [tmdbKeyInput, setTmdbKeyInput] = useState('')
+
+  // Auto-fetched TMDB ID for the currently-open post (if any).
+  const [tmdbId, setTmdbId] = useState<number | null>(null)
+  const [tmdbIdLoading, setTmdbIdLoading] = useState(false)
+  const [tmdbIdError, setTmdbIdError] = useState<string | null>(null)
+
   // User-supplied cinemm.com visitor UUIDs (from localStorage). When present,
   // requests use the active UUID directly via the user_uuid cookie — bypassing
   // the auto-refresh path and its IP rate-limiting side effects.
@@ -400,6 +413,11 @@ export default function Home() {
     if (storedQuota) {
       const n = parseInt(storedQuota, 10)
       if (Number.isFinite(n)) setRemainingQuota(n)
+    }
+    const storedTmdbKey = window.localStorage.getItem('cinemm_tmdb_api_key')
+    if (storedTmdbKey) {
+      setTmdbApiKey(storedTmdbKey)
+      setTmdbKeyInput(storedTmdbKey)
     }
   }, [])
 
@@ -463,6 +481,28 @@ export default function Home() {
     toast.info('All UUIDs cleared — using auto-refresh mode')
   }, [])
 
+  const saveTmdbApiKey = useCallback(() => {
+    const trimmed = tmdbKeyInput.trim()
+    if (trimmed) {
+      window.localStorage.setItem('cinemm_tmdb_api_key', trimmed)
+      setTmdbApiKey(trimmed)
+      toast.success('TMDB API key saved — TMDB ID lookup enabled')
+    } else {
+      window.localStorage.removeItem('cinemm_tmdb_api_key')
+      setTmdbApiKey(null)
+      toast.info('TMDB API key cleared — TMDB ID lookup disabled')
+    }
+  }, [tmdbKeyInput])
+
+  const clearTmdbApiKey = useCallback(() => {
+    window.localStorage.removeItem('cinemm_tmdb_api_key')
+    setTmdbApiKey(null)
+    setTmdbKeyInput('')
+    setTmdbId(null)
+    setTmdbIdError(null)
+    toast.info('TMDB API key cleared — TMDB ID lookup disabled')
+  }, [])
+
   const onSubmit = useCallback(
     async (e?: React.FormEvent) => {
       e?.preventDefault()
@@ -507,6 +547,8 @@ export default function Home() {
     setSelectedEpisode(null)
     setManualDownloadLinks([])
     setManualWatchLinks([])
+    setTmdbId(null)
+    setTmdbIdError(null)
     // Push URL state so the browser back button returns to search results.
     const detailUrl = new URL(window.location.href)
     detailUrl.searchParams.set('view', 'details')
@@ -573,6 +615,31 @@ export default function Home() {
       if (fetched.type === 'series' && (fetched as SeriesDetails).seasons.length > 0) {
         setExpandedSeasons(new Set([(fetched as SeriesDetails).seasons[0].id]))
       }
+      // Kick off TMDB ID lookup (non-blocking). Uses user-supplied API key.
+      // Inlined here (rather than calling a separate useCallback) to avoid
+      // "Cannot access X before initialization" — the helper is defined below.
+      if (tmdbApiKey && item.name) {
+        setTmdbIdLoading(true)
+        setTmdbIdError(null)
+        try {
+          const tmdbUrl = new URL('/api/tmdb-id', window.location.origin)
+          tmdbUrl.searchParams.set('name', item.name)
+          tmdbUrl.searchParams.set('year', item.year)
+          tmdbUrl.searchParams.set('type', item.type)
+          tmdbUrl.searchParams.set('apiKey', tmdbApiKey)
+          const tmdbRes = await fetch(tmdbUrl.toString())
+          const tmdbData = (await tmdbRes.json()) as { tmdbId?: number | null; error?: string }
+          if (tmdbRes.ok) {
+            setTmdbId(tmdbData.tmdbId ?? null)
+          } else {
+            setTmdbIdError(tmdbData.error || `Failed (${tmdbRes.status})`)
+          }
+        } catch (err) {
+          setTmdbIdError(err instanceof Error ? err.message : 'Failed to look up TMDB ID')
+        } finally {
+          setTmdbIdLoading(false)
+        }
+      }
       if (fetched.error === 'IP_RATE_LIMITED') {
         toast.error('cinemm.com IP rate-limited. Try a VPN, switch network, or wait ~1 hour.', { duration: 8000 })
       } else if (fetched.error === 'QUOTA_EXCEEDED') {
@@ -586,7 +653,7 @@ export default function Home() {
     } finally {
       setDetailsLoading(false)
     }
-  }, [visitorUuid, visitorUuids, activeUuidIndex])
+  }, [visitorUuid, visitorUuids, activeUuidIndex, tmdbApiKey])
 
   const closeDetails = useCallback(() => {
     // Pop the URL state we pushed in openDetails so the browser back button
@@ -606,6 +673,8 @@ export default function Home() {
       setSelectedEpisode(null)
       setManualDownloadLinks([])
       setManualWatchLinks([])
+    setTmdbId(null)
+    setTmdbIdError(null)
     }
   }, [])
 
@@ -626,6 +695,8 @@ export default function Home() {
         setSelectedEpisode(null)
         setManualDownloadLinks([])
         setManualWatchLinks([])
+    setTmdbId(null)
+    setTmdbIdError(null)
       }
     }
     window.addEventListener('popstate', onPopState)
@@ -641,6 +712,9 @@ export default function Home() {
       return next
     })
   }, [])
+
+  // Look up the real TMDB ID for the currently-open post. (Inlined in
+  // openDetails above; this space kept intentionally blank.)
 
   // Fetch servers for a single episode. Idempotent — if already loaded or
   // currently loading, returns immediately.
@@ -689,16 +763,16 @@ export default function Home() {
 
   const handleDownloadJson = useCallback(() => {
     if (!selected) return
-    const payload = buildJsonPayload(selected, details, episodeServers, manualDownloadLinks, manualWatchLinks)
+    const payload = buildJsonPayload(selected, details, episodeServers, manualDownloadLinks, manualWatchLinks, tmdbId)
     const name = sanitizeFilename(selected.name || `id-${selected.id}`)
     const year = selected.year || 'unknown'
     downloadJson(`${name}_${year}_${selected.type}_${selected.id}.json`, payload)
     toast.success('JSON downloaded')
-  }, [selected, details, episodeServers, manualDownloadLinks, manualWatchLinks])
+  }, [selected, details, episodeServers, manualDownloadLinks, manualWatchLinks, tmdbId])
 
   const handleCopyJson = useCallback(async () => {
     if (!selected) return
-    const payload = buildJsonPayload(selected, details, episodeServers, manualDownloadLinks, manualWatchLinks)
+    const payload = buildJsonPayload(selected, details, episodeServers, manualDownloadLinks, manualWatchLinks, tmdbId)
     try {
       await navigator.clipboard.writeText(JSON.stringify(payload, null, 2))
       setCopied(true)
@@ -707,7 +781,7 @@ export default function Home() {
     } catch {
       toast.error('Copy failed')
     }
-  }, [selected, details, episodeServers, manualDownloadLinks, manualWatchLinks])
+  }, [selected, details, episodeServers, manualDownloadLinks, manualWatchLinks, tmdbId])
 
   return (
     <div className="min-h-screen flex flex-col bg-zinc-950 text-zinc-100">
@@ -880,6 +954,67 @@ export default function Home() {
                   <span className="text-zinc-400">No UUID — auto-refresh mode (IP rate-limited)</span>
                 )}
               </p>
+
+              {/* TMDB API key section */}
+              <div className="pt-3 border-t border-zinc-800 mt-3 space-y-3">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <Database className="w-4 h-4 text-purple-400" />
+                    <h4 className="text-sm font-semibold text-zinc-100">TMDB API Key</h4>
+                    {tmdbApiKey && (
+                      <Badge variant="outline" className="border-green-900/50 text-green-400 text-xs">
+                        active
+                      </Badge>
+                    )}
+                  </div>
+                  {tmdbApiKey && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={clearTmdbApiKey}
+                      className="bg-zinc-900 border-zinc-700 hover:bg-zinc-800 text-zinc-100 text-xs"
+                    >
+                      Clear
+                    </Button>
+                  )}
+                </div>
+                <p className="text-xs text-zinc-400 leading-relaxed">
+                  Provide a TMDB API key to auto-look up the real TMDB movie/series ID by name + year.
+                  The ID is fetched once and cached in SQLite. Get a free key at{' '}
+                  <a
+                    href="https://www.themoviedb.org/settings/api"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-purple-400 hover:text-purple-300 underline"
+                  >
+                    themoviedb.org
+                  </a>
+                  .
+                </p>
+                <div className="flex gap-2">
+                  <Input
+                    type="text"
+                    placeholder="Paste your TMDB API key (v3 auth)"
+                    value={tmdbKeyInput}
+                    onChange={(e) => setTmdbKeyInput(e.target.value)}
+                    className="bg-zinc-950 border-zinc-700 text-zinc-100 placeholder:text-zinc-600 focus-visible:ring-purple-500 font-mono text-sm"
+                  />
+                  <Button
+                    size="sm"
+                    onClick={saveTmdbApiKey}
+                    className="bg-purple-600 hover:bg-purple-700 text-white"
+                  >
+                    Save
+                  </Button>
+                </div>
+                <p className="text-xs text-zinc-500">
+                  Status: {tmdbApiKey ? (
+                    <span className="text-green-400">TMDB ID lookup enabled</span>
+                  ) : (
+                    <span className="text-zinc-400">No API key — TMDB ID lookup disabled</span>
+                  )}
+                </p>
+              </div>
             </div>
           </div>
         )}
@@ -1031,6 +1166,33 @@ export default function Home() {
               <Badge variant="outline" className="ml-1 border-zinc-700 text-zinc-300 capitalize">
                 {selected.type}
               </Badge>
+              {tmdbIdLoading && (
+                <Badge variant="outline" className="border-zinc-700 text-zinc-400 text-xs">
+                  <Loader2 className="w-3 h-3 mr-1 animate-spin" /> TMDB…
+                </Badge>
+              )}
+              {!tmdbIdLoading && tmdbId !== null && (
+                <a
+                  href={`https://www.themoviedb.org/${selected.type}/${tmdbId}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center"
+                >
+                  <Badge variant="outline" className="border-purple-900/50 text-purple-400 text-xs hover:bg-purple-950/30">
+                    <Database className="w-3 h-3 mr-1" /> TMDB: {tmdbId}
+                  </Badge>
+                </a>
+              )}
+              {!tmdbIdLoading && tmdbId === null && tmdbApiKey && !tmdbIdError && (
+                <Badge variant="outline" className="border-zinc-800 text-zinc-600 text-xs">
+                  TMDB: not found
+                </Badge>
+              )}
+              {tmdbIdError && (
+                <Badge variant="outline" className="border-amber-900/50 text-amber-400 text-xs" title={tmdbIdError}>
+                  TMDB: error
+                </Badge>
+              )}
             </h2>
           </div>
 

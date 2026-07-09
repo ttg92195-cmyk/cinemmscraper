@@ -811,3 +811,73 @@ export async function getDetails(
   }
   return getSeriesDetails(item.id, item.source, item.name, item.year, item.poster, opts)
 }
+
+// ---------------------------------------------------------------------------
+// TMDB ID lookup (uses the public TMDB API; cached in SQLite)
+// ---------------------------------------------------------------------------
+
+/**
+ * Look up the real TMDB movie/series ID by name + year. The result is cached
+ * in SQLite so subsequent calls for the same name+year+type are free.
+ *
+ * Args:
+ *   - name: e.g. "Inception", "Breaking Bad"
+ *   - year: e.g. "2010", "2008" (extracted from cinemm.com's year field)
+ *   - type: 'movie' or 'series'
+ *   - apiKey: TMDB v3 API key
+ *
+ * Returns the TMDB ID as a number, or null if not found / on error.
+ */
+export async function lookupTmdbId(
+  name: string,
+  year: string,
+  type: MediaType,
+  apiKey: string,
+  opts: { useCache?: boolean } = {},
+): Promise<{ tmdbId: number | null; cached: boolean }> {
+  if (!name || !apiKey) return { tmdbId: null, cached: false }
+  // Extract first 4-digit year from the year string (handles "2010", "2008-2013", etc.)
+  const yearMatch = year.match(/\d{4}/)
+  const yearNum = yearMatch ? parseInt(yearMatch[0], 10) : null
+
+  const cacheKey = `tmdb:${type}:${name.toLowerCase()}:${yearNum ?? 'any'}`
+  if (opts.useCache !== false) {
+    const cached = await getCached<{ tmdbId: number | null }>(cacheKey)
+    if (cached) return { tmdbId: cached.tmdbId, cached: true }
+  }
+
+  const endpoint = type === 'movie' ? 'search/movie' : 'search/tv'
+  const url = new URL(`https://api.themoviedb.org/3/${endpoint}`)
+  url.searchParams.set('api_key', apiKey)
+  url.searchParams.set('query', name)
+  url.searchParams.set('include_adult', 'false')
+  if (yearNum) {
+    url.searchParams.set(type === 'movie' ? 'year' : 'first_air_date_year', String(yearNum))
+  }
+
+  try {
+    const res = await fetch(url.toString(), {
+      headers: { Accept: 'application/json' },
+    })
+    if (!res.ok) {
+      console.error(`TMDB API returned HTTP ${res.status}`)
+      return { tmdbId: null, cached: false }
+    }
+    const data = (await res.json()) as {
+      results?: Array<{ id: number; title?: string; name?: string }>
+    }
+    const results = data.results ?? []
+    if (results.length === 0) {
+      // Cache negative result too (avoid re-querying for known-misses)
+      await setCached(cacheKey, { tmdbId: null })
+      return { tmdbId: null, cached: false }
+    }
+    // Pick the first result (TMDB's search is already ranked by relevance).
+    const tmdbId = results[0].id
+    await setCached(cacheKey, { tmdbId })
+    return { tmdbId, cached: false }
+  } catch (e) {
+    console.error('TMDB lookup failed:', e)
+    return { tmdbId: null, cached: false }
+  }
+}
