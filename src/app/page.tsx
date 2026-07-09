@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useCallback, useEffect, useMemo } from 'react'
-import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight, ArrowLeft, KeyRound, Settings } from 'lucide-react'
+import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight, ArrowLeft, KeyRound, Settings, Plus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -234,6 +234,8 @@ function buildJsonPayload(
   item: SearchItem,
   details: Details | null,
   episodeServers?: Map<number, Server[]>,
+  manualDownloadLinks: ParsedDownloadLink[] = [],
+  manualWatchLinks: ParsedWatchLink[] = [],
 ) {
   const overview = details?.overview ?? ''
   const metadata = parseOverviewMetadata(overview)
@@ -243,6 +245,7 @@ function buildJsonPayload(
 
   if (details?.type === 'movie') {
     const { downloadLinks, watchLinks } = splitServers(details.servers)
+    // Merge auto-fetched links with user-supplied manual links (manual first).
     movieEntry = {
       title: item.name,
       year: item.year,
@@ -254,8 +257,8 @@ function buildJsonPayload(
       resolution: metadata.resolution,
       fileSize: metadata.fileSize,
       format: metadata.format,
-      downloadLinks,
-      watchLinks,
+      downloadLinks: [...manualDownloadLinks, ...downloadLinks],
+      watchLinks: [...manualWatchLinks, ...watchLinks],
       seasons: [],
     }
   } else if (details?.type === 'series') {
@@ -272,6 +275,7 @@ function buildJsonPayload(
         }
       }),
     }))
+    // For series, manual links apply at the top level (not per-episode).
     movieEntry = {
       title: item.name,
       year: item.year,
@@ -283,12 +287,12 @@ function buildJsonPayload(
       resolution: metadata.resolution,
       fileSize: metadata.fileSize,
       format: metadata.format,
-      downloadLinks: [],
-      watchLinks: [],
+      downloadLinks: [...manualDownloadLinks],
+      watchLinks: [...manualWatchLinks],
       seasons,
     }
   } else {
-    // No details loaded (quota exceeded / not fetched yet)
+    // No details loaded (quota exceeded / not fetched yet) — still allow manual links.
     movieEntry = {
       title: item.name,
       year: item.year,
@@ -300,8 +304,8 @@ function buildJsonPayload(
       resolution: '',
       fileSize: '',
       format: '',
-      downloadLinks: [],
-      watchLinks: [],
+      downloadLinks: [...manualDownloadLinks],
+      watchLinks: [...manualWatchLinks],
       seasons: [],
     }
   }
@@ -346,6 +350,12 @@ export default function Home() {
   const [episodeServersError, setEpisodeServersError] = useState<Set<number>>(new Set())
   const [expandedSeasons, setExpandedSeasons] = useState<Set<number>>(new Set())
   const [selectedEpisode, setSelectedEpisode] = useState<number | null>(null)
+
+  // User-supplied manual download + watch links. These get merged with the
+  // auto-fetched links in the JSON output. Survive page navigation within
+  // the same session (cleared when a new post is opened).
+  const [manualDownloadLinks, setManualDownloadLinks] = useState<ParsedDownloadLink[]>([])
+  const [manualWatchLinks, setManualWatchLinks] = useState<ParsedWatchLink[]>([])
 
   // User-supplied cinemm.com visitor UUIDs (from localStorage). When present,
   // requests use the active UUID directly via the user_uuid cookie — bypassing
@@ -495,6 +505,8 @@ export default function Home() {
     setEpisodeServersError(new Set())
     setExpandedSeasons(new Set())
     setSelectedEpisode(null)
+    setManualDownloadLinks([])
+    setManualWatchLinks([])
     // Push URL state so the browser back button returns to search results.
     const detailUrl = new URL(window.location.href)
     detailUrl.searchParams.set('view', 'details')
@@ -592,6 +604,8 @@ export default function Home() {
       setEpisodeServersError(new Set())
       setExpandedSeasons(new Set())
       setSelectedEpisode(null)
+      setManualDownloadLinks([])
+      setManualWatchLinks([])
     }
   }, [])
 
@@ -610,6 +624,8 @@ export default function Home() {
         setEpisodeServersError(new Set())
         setExpandedSeasons(new Set())
         setSelectedEpisode(null)
+        setManualDownloadLinks([])
+        setManualWatchLinks([])
       }
     }
     window.addEventListener('popstate', onPopState)
@@ -673,16 +689,16 @@ export default function Home() {
 
   const handleDownloadJson = useCallback(() => {
     if (!selected) return
-    const payload = buildJsonPayload(selected, details, episodeServers)
+    const payload = buildJsonPayload(selected, details, episodeServers, manualDownloadLinks, manualWatchLinks)
     const name = sanitizeFilename(selected.name || `id-${selected.id}`)
     const year = selected.year || 'unknown'
     downloadJson(`${name}_${year}_${selected.type}_${selected.id}.json`, payload)
     toast.success('JSON downloaded')
-  }, [selected, details, episodeServers])
+  }, [selected, details, episodeServers, manualDownloadLinks, manualWatchLinks])
 
   const handleCopyJson = useCallback(async () => {
     if (!selected) return
-    const payload = buildJsonPayload(selected, details, episodeServers)
+    const payload = buildJsonPayload(selected, details, episodeServers, manualDownloadLinks, manualWatchLinks)
     try {
       await navigator.clipboard.writeText(JSON.stringify(payload, null, 2))
       setCopied(true)
@@ -691,7 +707,7 @@ export default function Home() {
     } catch {
       toast.error('Copy failed')
     }
-  }, [selected, details])
+  }, [selected, details, episodeServers, manualDownloadLinks, manualWatchLinks])
 
   return (
     <div className="min-h-screen flex flex-col bg-zinc-950 text-zinc-100">
@@ -1051,6 +1067,16 @@ export default function Home() {
               onSelectEpisode={setSelectedEpisode}
             />
           )}
+
+          {/* Manual links editor — user can add their own download/stream links */}
+          <ManualLinksEditor
+            manualDownloadLinks={manualDownloadLinks}
+            manualWatchLinks={manualWatchLinks}
+            onAddDownloadLink={(link) => setManualDownloadLinks((prev) => [...prev, link])}
+            onRemoveDownloadLink={(i) => setManualDownloadLinks((prev) => prev.filter((_, idx) => idx !== i))}
+            onAddWatchLink={(link) => setManualWatchLinks((prev) => [...prev, link])}
+            onRemoveWatchLink={(i) => setManualWatchLinks((prev) => prev.filter((_, idx) => idx !== i))}
+          />
 
           {/* Footer actions (sticky at bottom of detail page) */}
           <div className="mt-6 pt-4 border-t border-zinc-800 flex flex-wrap items-center justify-between gap-2">
@@ -1474,5 +1500,233 @@ function EpisodeRow({ episode, isSelected, servers, isLoading, hasError, onClick
         </div>
       )}
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Manual links editor — lets the user add their own download/stream links
+// that get merged into the JSON output alongside the auto-fetched links.
+// ---------------------------------------------------------------------------
+
+interface ManualLinksEditorProps {
+  manualDownloadLinks: ParsedDownloadLink[]
+  manualWatchLinks: ParsedWatchLink[]
+  onAddDownloadLink: (link: ParsedDownloadLink) => void
+  onRemoveDownloadLink: (index: number) => void
+  onAddWatchLink: (link: ParsedWatchLink) => void
+  onRemoveWatchLink: (index: number) => void
+}
+
+function ManualLinksEditor({
+  manualDownloadLinks,
+  manualWatchLinks,
+  onAddDownloadLink,
+  onRemoveDownloadLink,
+  onAddWatchLink,
+  onRemoveWatchLink,
+}: ManualLinksEditorProps) {
+  const [expanded, setExpanded] = useState(false)
+
+  // Form state for a new download link
+  const [dlServerName, setDlServerName] = useState('')
+  const [dlUrl, setDlUrl] = useState('')
+  const [dlSize, setDlSize] = useState('')
+  const [dlQuality, setDlQuality] = useState('1080p')
+  const [dlFileName, setDlFileName] = useState('')
+
+  // Form state for a new watch link
+  const [wlServerName, setWlServerName] = useState('')
+  const [wlUrl, setWlUrl] = useState('')
+  const [wlSize, setWlSize] = useState('')
+  const [wlQuality, setWlQuality] = useState('1080p')
+
+  const addDownload = () => {
+    if (!dlUrl.trim()) return
+    onAddDownloadLink({
+      serverName: dlServerName.trim() || 'Manual Link',
+      url: dlUrl.trim(),
+      size: dlSize.trim() || 'N/A',
+      quality: dlQuality.trim() || 'Unknown',
+      fileName: dlFileName.trim() || parseFileName(dlUrl.trim()),
+    })
+    setDlServerName('')
+    setDlUrl('')
+    setDlSize('')
+    setDlFileName('')
+  }
+
+  const addWatch = () => {
+    if (!wlUrl.trim()) return
+    onAddWatchLink({
+      serverName: wlServerName.trim() || 'Manual Player',
+      url: wlUrl.trim(),
+      size: wlSize.trim() || 'N/A',
+      quality: wlQuality.trim() || 'Unknown',
+    })
+    setWlServerName('')
+    setWlUrl('')
+    setWlSize('')
+  }
+
+  return (
+    <section className="mt-6">
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-md border border-zinc-800 bg-zinc-900/60 hover:bg-zinc-800/60 text-left"
+      >
+        <div className="flex items-center gap-2">
+          <Plus className={`w-4 h-4 text-zinc-400 ${expanded ? 'rotate-45' : ''}`} />
+          <span className="font-medium text-sm text-zinc-100">Manual Links</span>
+          <Badge variant="outline" className="border-zinc-700 text-zinc-400 text-xs ml-1">
+            {manualDownloadLinks.length + manualWatchLinks.length} added
+          </Badge>
+        </div>
+        <span className="text-xs text-zinc-500">
+          {expanded ? 'Click to collapse' : 'Add your own download/stream links'}
+        </span>
+      </button>
+
+      {expanded && (
+        <div className="mt-2 space-y-4 border border-zinc-800 bg-zinc-900/40 rounded-md p-4">
+          <p className="text-xs text-zinc-400">
+            Add your own download or stream links here. They will be merged with the auto-fetched links in the JSON
+            output (manual links appear first).
+          </p>
+
+          {/* Download links section */}
+          <div>
+            <h4 className="text-xs font-semibold text-zinc-200 mb-2 flex items-center gap-2">
+              <Download className="w-3.5 h-3.5 text-purple-400" /> Download Links
+            </h4>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
+              <Input
+                type="text"
+                placeholder="Server name (e.g. Google Drive)"
+                value={dlServerName}
+                onChange={(e) => setDlServerName(e.target.value)}
+                className="bg-zinc-950 border-zinc-700 text-zinc-100 placeholder:text-zinc-600 text-xs h-8"
+              />
+              <Input
+                type="text"
+                placeholder="Quality (e.g. 4K, 1080p)"
+                value={dlQuality}
+                onChange={(e) => setDlQuality(e.target.value)}
+                className="bg-zinc-950 border-zinc-700 text-zinc-100 placeholder:text-zinc-600 text-xs h-8"
+              />
+              <Input
+                type="url"
+                placeholder="URL (https://...)"
+                value={dlUrl}
+                onChange={(e) => setDlUrl(e.target.value)}
+                className="bg-zinc-950 border-zinc-700 text-zinc-100 placeholder:text-zinc-600 text-xs h-8 sm:col-span-2"
+              />
+              <Input
+                type="text"
+                placeholder="Size (e.g. 2.5 GB)"
+                value={dlSize}
+                onChange={(e) => setDlSize(e.target.value)}
+                className="bg-zinc-950 border-zinc-700 text-zinc-100 placeholder:text-zinc-600 text-xs h-8"
+              />
+              <Input
+                type="text"
+                placeholder="File name (auto-extracted if empty)"
+                value={dlFileName}
+                onChange={(e) => setDlFileName(e.target.value)}
+                className="bg-zinc-950 border-zinc-700 text-zinc-100 placeholder:text-zinc-600 text-xs h-8"
+              />
+            </div>
+            <Button
+              size="sm"
+              onClick={addDownload}
+              disabled={!dlUrl.trim()}
+              className="bg-purple-600 hover:bg-purple-700 text-white text-xs h-8"
+            >
+              <Plus className="w-3 h-3 mr-1" /> Add Download Link
+            </Button>
+
+            {manualDownloadLinks.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {manualDownloadLinks.map((link, i) => (
+                  <div key={i} className="flex items-center gap-2 px-2 py-1.5 rounded border border-zinc-800 bg-zinc-950/60">
+                    <Download className="w-3 h-3 text-purple-400 shrink-0" />
+                    <span className="text-xs text-zinc-200 truncate flex-1">{link.serverName}</span>
+                    <Badge variant="outline" className="border-zinc-700 text-zinc-400 text-[10px] px-1">{link.quality}</Badge>
+                    <button
+                      onClick={() => onRemoveDownloadLink(i)}
+                      className="text-red-400 hover:text-red-300 shrink-0"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Watch/stream links section */}
+          <div>
+            <h4 className="text-xs font-semibold text-zinc-200 mb-2 flex items-center gap-2">
+              <Tv className="w-3.5 h-3.5 text-purple-400" /> Watch / Stream Links
+            </h4>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
+              <Input
+                type="text"
+                placeholder="Player name (e.g. Player 1)"
+                value={wlServerName}
+                onChange={(e) => setWlServerName(e.target.value)}
+                className="bg-zinc-950 border-zinc-700 text-zinc-100 placeholder:text-zinc-600 text-xs h-8"
+              />
+              <Input
+                type="text"
+                placeholder="Quality (e.g. 1080p)"
+                value={wlQuality}
+                onChange={(e) => setWlQuality(e.target.value)}
+                className="bg-zinc-950 border-zinc-700 text-zinc-100 placeholder:text-zinc-600 text-xs h-8"
+              />
+              <Input
+                type="url"
+                placeholder="URL (https://...)"
+                value={wlUrl}
+                onChange={(e) => setWlUrl(e.target.value)}
+                className="bg-zinc-950 border-zinc-700 text-zinc-100 placeholder:text-zinc-600 text-xs h-8 sm:col-span-2"
+              />
+              <Input
+                type="text"
+                placeholder="Size (optional)"
+                value={wlSize}
+                onChange={(e) => setWlSize(e.target.value)}
+                className="bg-zinc-950 border-zinc-700 text-zinc-100 placeholder:text-zinc-600 text-xs h-8"
+              />
+            </div>
+            <Button
+              size="sm"
+              onClick={addWatch}
+              disabled={!wlUrl.trim()}
+              className="bg-purple-600 hover:bg-purple-700 text-white text-xs h-8"
+            >
+              <Plus className="w-3 h-3 mr-1" /> Add Watch Link
+            </Button>
+
+            {manualWatchLinks.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {manualWatchLinks.map((link, i) => (
+                  <div key={i} className="flex items-center gap-2 px-2 py-1.5 rounded border border-zinc-800 bg-zinc-950/60">
+                    <Tv className="w-3 h-3 text-purple-400 shrink-0" />
+                    <span className="text-xs text-zinc-200 truncate flex-1">{link.serverName}</span>
+                    <Badge variant="outline" className="border-zinc-700 text-zinc-400 text-[10px] px-1">{link.quality}</Badge>
+                    <button
+                      onClick={() => onRemoveWatchLink(i)}
+                      className="text-red-400 hover:text-red-300 shrink-0"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
   )
 }
