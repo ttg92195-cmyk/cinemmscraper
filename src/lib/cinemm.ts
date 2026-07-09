@@ -611,7 +611,21 @@ export async function getSeriesDetails(
     const { lines } = await callAction(ACTIONS.getSeriesDetails, [id, source], {
       visitorUuid: opts.visitorUuid,
     })
-    const result = parseSeriesDetailsResponse(lines, { id, source, name, year, poster })
+    // Extract overview from line "10:" (text chunk) and seasons from line "1:"
+    let overview = lines.get('10') ?? ''
+    const tMatch = overview.match(/^T[0-9a-f]+,(.*)$/s)
+    if (tMatch) overview = tMatch[1]
+    let seasonsJson = lines.get('1') ?? ''
+    let seasons: CinemmSeason[] = []
+    if (seasonsJson) {
+      try {
+        const parsed = JSON.parse(seasonsJson) as { seasons?: CinemmSeason[] }
+        seasons = parsed.seasons ?? []
+      } catch (e) {
+        console.error('Failed to parse seasons JSON (UUID path):', e)
+      }
+    }
+    const result = parseSeriesDetailsResponse(lines, { id, source, name, year, poster }, overview, seasons)
     if (result.overview || result.seasons.length > 0) await setCached(key, result)
     return result
   }
