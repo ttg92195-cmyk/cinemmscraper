@@ -895,7 +895,7 @@ export default function Home() {
                 </Button>
               </div>
               {visitorUuids.length > 0 && (
-                <div className="space-y-1.5">
+                <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
                   {visitorUuids.map((uuid, i) => (
                     <div
                       key={`${uuid}-${i}`}
