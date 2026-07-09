@@ -656,26 +656,34 @@ export default function Home() {
   }, [visitorUuid, visitorUuids, activeUuidIndex, tmdbApiKey])
 
   const closeDetails = useCallback(() => {
-    // Pop the URL state we pushed in openDetails so the browser back button
-    // history stays consistent. If there's no pushed state (e.g. user landed
-    // directly on a detail URL), just clear the local state.
-    if (window.history.state && window.history.state.view === 'details') {
-      window.history.back()
-    } else {
-      setSelected(null)
-      setDetails(null)
-      setDetailsError(null)
-      setCopied(false)
-      setEpisodeServers(new Map())
-      setEpisodeServersLoading(new Set())
-      setEpisodeServersError(new Set())
-      setExpandedSeasons(new Set())
-      setSelectedEpisode(null)
-      setManualDownloadLinks([])
-      setManualWatchLinks([])
+    // Clear all detail-related state immediately so one click on "Back to
+    // search" returns to the search results page. We replace the current
+    // history entry (rather than pushing a new one) so the browser back
+    // button doesn't bounce through an intermediate state.
+    const cleanUrl = new URL(window.location.href)
+    // Strip all detail-related params, keep only search query/type
+    cleanUrl.searchParams.delete('view')
+    cleanUrl.searchParams.delete('id')
+    cleanUrl.searchParams.delete('type')
+    cleanUrl.searchParams.delete('source')
+    cleanUrl.searchParams.delete('name')
+    cleanUrl.searchParams.delete('year')
+    cleanUrl.searchParams.delete('poster')
+    window.history.replaceState({ view: 'search' }, '', cleanUrl.toString())
+    setSelected(null)
+    setDetails(null)
+    setDetailsError(null)
+    setCopied(false)
+    setEpisodeServers(new Map())
+    setEpisodeServersLoading(new Set())
+    setEpisodeServersError(new Set())
+    setExpandedSeasons(new Set())
+    setSelectedEpisode(null)
+    setManualDownloadLinks([])
+    setManualWatchLinks([])
     setTmdbId(null)
     setTmdbIdError(null)
-    }
+    window.scrollTo(0, 0)
   }, [])
 
   // Listen for browser back/forward — when the URL no longer has
