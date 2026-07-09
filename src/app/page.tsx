@@ -1055,7 +1055,6 @@ export default function Home() {
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   className="pl-10 bg-zinc-900 border-zinc-700 text-zinc-100 placeholder:text-zinc-500 focus-visible:ring-purple-500"
-                  autoFocus
                 />
               </div>
               <Button type="submit" disabled={loading || !query.trim()} className="bg-purple-600 hover:bg-purple-700 text-white">
