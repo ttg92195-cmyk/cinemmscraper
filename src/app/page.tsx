@@ -158,53 +158,76 @@ function splitServers(servers: Server[]): {
   downloadLinks: ParsedDownloadLink[]
   watchLinks: ParsedWatchLink[]
 } {
-  // Group servers by URL. cinemm.com returns separate Stream and Download
-  // entries for the same URL, so we merge them: if both a "- Stream" and
-  // "- Download" entry share the same URL, we emit a single entry with a
-  // combined name like "Tube 1 (1080p) - Stream / Download".
+  // Extract the server source from the name.
+  // Name format: "Tube 1, (1080p) - Stream" or "Server 1 (4K) - Download"
+  // We want to extract "Tube 1", "Server 1", "Cloud 1" as the source.
+  function extractSource(name: string): string {
+    const m = name.match(/^(.+?)\s*[,（(]?\s*(?:4K|1080p|720p|2160p|480p|8K)/i)
+    if (m) return m[1].trim()
+    return name.replace(/\s*[（(].*$/, '').trim()
+  }
+
+  // First pass: deduplicate by URL (cinemm.com returns Stream + Download
+  // entries for the same URL).
   const byUrl = new Map<
     string,
-    { server: Server; quality: string; fileName: string; isStream: boolean; isDownload: boolean }
+    { server: Server; quality: string; fileName: string; source: string; isStream: boolean; isDownload: boolean }
   >()
   for (const s of servers) {
     const quality = parseQuality(s.name)
     const fileName = parseFileName(s.url)
+    const source = extractSource(s.name)
     const nameLower = s.name.toLowerCase()
     const isDownload = nameLower.includes('download')
     const isStream = nameLower.includes('stream')
     const existing = byUrl.get(s.url)
     if (existing) {
-      // Merge: combine the isStream/isDownload flags
       existing.isStream = existing.isStream || isStream
       existing.isDownload = existing.isDownload || isDownload
     } else {
-      byUrl.set(s.url, { server: s, quality, fileName, isStream, isDownload })
+      byUrl.set(s.url, { server: s, quality, fileName, source, isStream, isDownload })
     }
   }
 
+  // Second pass: group by source, preserving order of first appearance.
+  // This lets us assign "Server 1", "Server 2", "Server 3" to each unique
+  // source (e.g., Tube 1 → Server 1, Server 1 → Server 2, Cloud 1 → Server 3).
+  const sourceOrder: string[] = []
+  const bySource = new Map<
+    string,
+    { server: Server; quality: string; fileName: string; isStream: boolean; isDownload: boolean }[]
+  >()
+  for (const { server, quality, fileName, source, isStream, isDownload } of byUrl.values()) {
+    if (!bySource.has(source)) {
+      bySource.set(source, [])
+      sourceOrder.push(source)
+    }
+    bySource.get(source)!.push({ server, quality, fileName, isStream, isDownload })
+  }
+
+  // Build the output: for each source, list all its qualities.
   const downloadLinks: ParsedDownloadLink[] = []
   const watchLinks: ParsedWatchLink[] = []
   let serverIndex = 0
-  for (const { server, quality, fileName, isStream, isDownload } of byUrl.values()) {
+  for (const source of sourceOrder) {
     serverIndex++
-    // Simple sequential name: "Server 1", "Server 2", "Server 3", ...
     const simpleName = `Server ${serverIndex}`
-
-    // Add to BOTH downloadLinks and watchLinks. Since cinemm.com uses the same
-    // URL for both Stream and Download, every server can serve both purposes.
-    downloadLinks.push({
-      serverName: simpleName,
-      url: server.url,
-      size: server.size,
-      quality,
-      fileName,
-    })
-    watchLinks.push({
-      serverName: simpleName,
-      url: server.url,
-      size: server.size,
-      quality,
-    })
+    const entries = bySource.get(source)!
+    for (const { server, quality, fileName } of entries) {
+      downloadLinks.push({
+        serverName: simpleName,
+        url: server.url,
+        size: server.size,
+        quality,
+        fileName,
+      })
+      watchLinks.push({
+        serverName: simpleName,
+        url: server.url,
+        size: server.size,
+        quality,
+      })
+    }
   }
   return { downloadLinks, watchLinks }
 }
