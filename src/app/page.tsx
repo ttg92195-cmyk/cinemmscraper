@@ -2,7 +2,6 @@
 
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight, ArrowLeft, KeyRound, Settings, Plus, Zap } from 'lucide-react'
-import { searchCinemmBrowser, getMovieDetailsBrowser, getSeriesDetailsBrowser, getEpisodeServersBrowser } from '@/lib/cinemm-browser'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -565,28 +564,16 @@ export default function Home() {
       setError(null)
       setResults(null)
       try {
-        // Browser-side fetch first (user's IP). Falls back to server API
-        // if CORS blocks the request.
-        let items: SearchItem[] = []
-        let cached = false
-        const browserResult = await searchCinemmBrowser(q, mediaType)
-        if (browserResult.items.length > 0) {
-          items = browserResult.items
-          cached = browserResult.cached
-        } else {
-          // Fallback to server-side API
-          const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&type=${mediaType}`)
-          const data = await res.json()
-          if (!res.ok) throw new Error(data.error || `Search failed (${res.status})`)
-          items = data.items
-          cached = !!data.cached
-        }
-        setResults(items)
-        setCachedSearch(cached)
-        if (items.length === 0) {
+        // Server-side fetch via API route (Vercel IP, no CORS issues).
+        const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&type=${mediaType}`)
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error || `Search failed (${res.status})`)
+        setResults(data.items)
+        setCachedSearch(!!data.cached)
+        if (data.items.length === 0) {
           toast.info('No results found. Try a different search term.')
         } else {
-          toast.success(`Found ${items.length} ${cached ? 'cached ' : ''}result${items.length === 1 ? '' : 's'}`)
+          toast.success(`Found ${data.items.length} ${data.cached ? 'cached ' : ''}result${data.items.length === 1 ? '' : 's'}`)
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Search failed')
@@ -625,34 +612,18 @@ export default function Home() {
     window.history.pushState({ view: 'details', itemId: item.id }, '', detailUrl.toString())
     window.scrollTo(0, 0)
     try {
-      // Browser-side fetch first (uses user's IP). Falls back to server API
-      // if CORS blocks the request or if it returns no content.
-      let fetched: Details | null = null
-      if (item.type === 'movie') {
-        const result = await getMovieDetailsBrowser(item.id, item.source, item.name, item.year, item.poster)
-        if (result.servers.length > 0 || result.overview.length > 0) {
-          fetched = result as unknown as Details
-        }
-      } else {
-        const result = await getSeriesDetailsBrowser(item.id, item.source, item.name, item.year, item.poster)
-        if (result.overview.length > 0 || result.seasons.length > 0) {
-          fetched = result as unknown as Details
-        }
-      }
-      // Fallback to server-side API if browser-side failed (CORS or rate-limit)
-      if (!fetched) {
-        const url = new URL('/api/details', window.location.origin)
-        url.searchParams.set('id', String(item.id))
-        url.searchParams.set('type', item.type)
-        url.searchParams.set('source', item.source)
-        url.searchParams.set('name', item.name)
-        url.searchParams.set('year', item.year)
-        url.searchParams.set('poster', item.poster)
-        const res = await fetch(url.toString())
-        const data = await res.json()
-        if (!res.ok) throw new Error(data.error || `Failed (${res.status})`)
-        fetched = data as Details
-      }
+      // Server-side fetch via API route (Vercel IP, no CORS issues).
+      const url = new URL('/api/details', window.location.origin)
+      url.searchParams.set('id', String(item.id))
+      url.searchParams.set('type', item.type)
+      url.searchParams.set('source', item.source)
+      url.searchParams.set('name', item.name)
+      url.searchParams.set('year', item.year)
+      url.searchParams.set('poster', item.poster)
+      const res = await fetch(url.toString())
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || `Failed (${res.status})`)
+      const fetched = data as Details
 
       setDetails(fetched)
       // Update remaining quota in header + localStorage
@@ -704,7 +675,7 @@ export default function Home() {
     } finally {
       setDetailsLoading(false)
     }
-  }, [tmdbApiKey])
+  }, [])
 
   const closeDetails = useCallback(() => {
     // Clear all detail-related state immediately so one click on "Back to
@@ -800,21 +771,13 @@ export default function Home() {
         return next
       })
       try {
-        // Browser-side fetch: uses the user's IP, not the server's IP.
-        const data = await getEpisodeServersBrowser(episodeId, source)
+        // Server-side fetch via API route (Vercel IP, no CORS issues).
+        const res = await fetch(`/api/episode-servers?episodeId=${episodeId}&source=${source}`)
+        const data: EpisodeServers = await res.json()
+        if (!res.ok) throw new Error((data as { error?: string }).error || `Failed (${res.status})`)
         if (data.error === 'RATE_LIMITED') {
           setEpisodeServersError((prev) => new Set(prev).add(episodeId))
           toast.warning('cinemm.com rate-limited — try again in a moment', { id: `ep-${episodeId}`, duration: 6000 })
-        } else if (data.error === 'FETCH_FAILED') {
-          setEpisodeServersError((prev) => new Set(prev).add(episodeId))
-          toast.error('Failed to fetch (CORS or network). Using server-side fallback.', { id: `ep-${episodeId}`, duration: 6000 })
-          // Fallback to server-side API
-          const res = await fetch(`/api/episode-servers?episodeId=${episodeId}&source=${source}`)
-          const fallback = await res.json() as EpisodeServers
-          if (fallback.servers.length > 0) {
-            setEpisodeServers((prev) => new Map(prev).set(episodeId, fallback.servers))
-            setEpisodeServersError((prev) => { const n = new Set(prev); n.delete(episodeId); return n })
-          }
         } else {
           setEpisodeServers((prev) => new Map(prev).set(episodeId, data.servers))
         }
