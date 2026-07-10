@@ -489,6 +489,83 @@ export default function Home() {
     }
   }, [activeUuidIndex, visitorUuids.length])
 
+  // On initial page load, check if the URL has view=details params.
+  // If so, auto-open the detail page — this lets users share/bookmark
+  // detail URLs and have them work on a fresh page load.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('view') === 'details') {
+      const item: SearchItem = {
+        id: parseInt(params.get('id') ?? '0', 10),
+        name: params.get('name') ?? '',
+        year: params.get('year') ?? '',
+        poster: params.get('poster') ?? '',
+        type: (params.get('type') as MediaType) ?? 'movie',
+        source: params.get('source') ?? 'CM',
+      }
+      if (item.id > 0 && item.name) {
+        // Trigger openDetails without pushState (URL is already correct)
+        setSelected(item)
+        setDetails(null)
+        setDetailsError(null)
+        setDetailsLoading(true)
+        setCopied(false)
+        setEpisodeServers(new Map())
+        setEpisodeServersLoading(new Set())
+        setEpisodeServersError(new Set())
+        setExpandedSeasons(new Set())
+        setSelectedEpisode(null)
+        setManualDownloadLinks([])
+        setManualWatchLinks([])
+        setTmdbId(null)
+        setTmdbIdError(null)
+        window.scrollTo(0, 0)
+        // Fetch details
+        ;(async () => {
+          try {
+            const url = new URL('/api/details', window.location.origin)
+            url.searchParams.set('id', String(item.id))
+            url.searchParams.set('type', item.type)
+            url.searchParams.set('source', item.source)
+            url.searchParams.set('name', item.name)
+            url.searchParams.set('year', item.year)
+            url.searchParams.set('poster', item.poster)
+            const res = await fetch(url.toString())
+            const data = await res.json()
+            if (!res.ok) throw new Error(data.error || `Failed (${res.status})`)
+            const fetched = data as Details
+            setDetails(fetched)
+            if (fetched.type === 'series' && (fetched as SeriesDetails).seasons.length > 0) {
+              setExpandedSeasons(new Set([(fetched as SeriesDetails).seasons[0].id]))
+            }
+            if (tmdbApiKey && item.name) {
+              setTmdbIdLoading(true)
+              try {
+                const tmdbUrl = new URL('/api/tmdb-id', window.location.origin)
+                tmdbUrl.searchParams.set('name', item.name)
+                tmdbUrl.searchParams.set('year', item.year)
+                tmdbUrl.searchParams.set('type', item.type)
+                tmdbUrl.searchParams.set('apiKey', tmdbApiKey)
+                const tmdbRes = await fetch(tmdbUrl.toString())
+                const tmdbData = (await tmdbRes.json()) as { tmdbId?: number | null; error?: string }
+                if (tmdbRes.ok) setTmdbId(tmdbData.tmdbId ?? null)
+                else setTmdbIdError(tmdbData.error || `Failed (${tmdbRes.status})`)
+              } catch (err) {
+                setTmdbIdError(err instanceof Error ? err.message : 'Failed to look up TMDB ID')
+              } finally {
+                setTmdbIdLoading(false)
+              }
+            }
+          } catch (err) {
+            setDetailsError(err instanceof Error ? err.message : 'Failed to load details')
+          } finally {
+            setDetailsLoading(false)
+          }
+        })()
+      }
+    }
+  }, [])
+
   const addVisitorUuid = useCallback(() => {
     const trimmed = uuidInput.trim()
     if (!trimmed) return
