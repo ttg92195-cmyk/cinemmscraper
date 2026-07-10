@@ -20,13 +20,13 @@ import { db } from '@/lib/db'
 
 const CINEMM_ORIGIN = 'https://cinemm.com'
 
-// Server Action IDs (extracted from cinemm.com's bundled JS)
+// Server Action IDs (extracted from cinemm.com's bundled JS — updated 2026-07-10
+// after cinemm.com removed the UUID/quota system and changed all action IDs).
 const ACTIONS = {
-  search:              '6018fac11e9b775fd3a7f877cdc4ab1b312b8e978c',
-  getMovieServers:     '401dd7f7ed7453fdfdcc55d28458444ecec9e4cc8d',
-  getSeriesDetails:    '40fbf1a13bd851f36bdfb8c1d23835fd1fc16b9ca4',
-  getEpisodeServers:   '4049901391797f2c009e9c215a59ebc6679aef2e62',
-  identifyUser:        '6077a1a88313137459881a82cca9e76114af8993f6',
+  search:              '608174a38f0214642b8855d3d6393e4214494192e7',
+  getMovieServers:     '40b6fd00069a831ba6225e836a43f8bdd5987d4a22',
+  getSeriesDetails:    '400fb0323d1f84386f54ce8b5ac06f35e7f98a363c',
+  getEpisodeServers:   '4040aab62cc485838fd326fadebc5d6fd74baf2f08',
 } as const
 
 const COMMON_HEADERS = {
@@ -191,19 +191,22 @@ function parseRsc(text: string): Map<string, string> {
       // We look for "1:{" patterns in the payload. To distinguish a real
       // RSC line "1:" from a coincidental "1:" inside text content (like
       // "Drama1:" or "Step1:"), we require that the JSON after "1:{" must
-      // be valid (parseable) and span to the end of the payload.
+      // be valid (parseable) and span to the end of the payload (after
+      // trimming trailing whitespace/newlines).
       const markerStr = '1:{'
       let searchFrom = payload.length
       while (true) {
         const markerPos = payload.lastIndexOf(markerStr, searchFrom)
         if (markerPos <= 0) break
         const afterMarker = payload.substring(markerPos + markerStr.length)
-        if (afterMarker.endsWith('}')) {
-          const candidateJson = '{' + afterMarker
+        const trimmedAfter = afterMarker.trimEnd()
+        if (trimmedAfter.endsWith('}')) {
+          const candidateJson = '{' + trimmedAfter
           try {
             JSON.parse(candidateJson)
             // Valid JSON found — this is the glued return value.
-            payload = payload.substring(0, markerPos)
+            // Strip the JSON (and any trailing whitespace) from the payload.
+            payload = payload.substring(0, markerPos).trimEnd()
             result.set('1', candidateJson)
             break
           } catch {
@@ -440,8 +443,13 @@ export async function searchCinemm(
   let items: CinemmSearchItem[] = []
   if (raw) {
     try {
-      const parsed = JSON.parse(raw) as CinemmSearchItem[]
-      items = parsed.map((it) => ({
+      // New format (2026-07-10+): { ok: true, results: [...] }
+      // Old format: array directly
+      const parsed = JSON.parse(raw) as
+        | CinemmSearchItem[]
+        | { ok: boolean; results: CinemmSearchItem[] }
+      const rawItems = Array.isArray(parsed) ? parsed : (parsed.results ?? [])
+      items = rawItems.map((it) => ({
         ...it,
         tmdbId: it.tmdbId === '$undefined' ? null : it.tmdbId,
         imdbId: it.imdbId === '$undefined' ? null : it.imdbId,
@@ -459,20 +467,77 @@ export async function searchCinemm(
 /**
  * Parse the RSC response from getMovieServersAction into a CinemmMovieDetails.
  * Shared between the user-UUID path and the auto-refresh path.
+ *
+ * New format (2026-07-10+):
+ *   - JSON return value on line "1:" (glued to end of overview text):
+ *     { ok: true, servers: [...], overview: "$2" }
+ *   - Overview text chunk on line "2:" (was line "10:" before)
+ *   - No more remaining/error/quota fields (UUID system removed)
+ *
+ * Old format (pre-2026-07-10):
+ *   - JSON return value on line "1:":
+ *     { servers: [...], remaining: N, error: "...", overview: "$<refId>" }
+ *   - Overview text chunk on line "10:"
  */
 function parseMovieDetailsResponse(
   lines: Map<string, string>,
   ctx: { id: number; source: string; name?: string; year?: string; poster?: string },
 ): CinemmMovieDetails {
-  const raw = lines.get('1')
+  let raw = lines.get('1')
   let servers: CinemmServer[] = []
   let remaining = 0
   let error: string | null = null
   let overview = ''
 
+  // Extract overview text. In the new format the overview is on line "2:"
+  // (a T-prefixed text chunk). In the old format it was on line "10:" and
+  // referenced via "$10" in the JSON. We check both.
+  const overviewCandidates = [lines.get('2'), lines.get('10')].filter(
+    (s): s is string => !!s && s.length > 0,
+  )
+  for (const candidate of overviewCandidates) {
+    let text = candidate
+    const tMatch = text.match(/^T[0-9a-f]+,(.*)$/s)
+    if (tMatch) text = tMatch[1]
+    // If the candidate contains "Translated by" (the usual end marker for
+    // cinemm.com overviews) or just has substantial content, use it.
+    if (text.length > 50) {
+      overview = text
+      break
+    }
+  }
+
+  // In the new format, the JSON return value is glued to the end of the
+  // overview text (line "2:"). We need to split it out.
+  // Pattern: ...overview text...1:{"ok":true,...}
+  // We search backwards from the end for "1:{" and try to parse what follows
+  // as JSON. We keep searching backwards until we find a valid JSON object.
+  if (!raw && overview) {
+    let searchFrom = overview.length
+    while (searchFrom > 0) {
+      const markerPos = overview.lastIndexOf('1:{', searchFrom)
+      if (markerPos <= 0) break
+      const afterMarker = overview.substring(markerPos + 2) // skip "1:"
+      if (afterMarker.endsWith('}')) {
+        try {
+          JSON.parse(afterMarker)
+          // Valid JSON found — this is the glued return value.
+          raw = afterMarker
+          overview = overview.substring(0, markerPos)
+          lines.set('1', raw)
+          break
+        } catch {
+          // Not valid JSON, keep searching backwards.
+        }
+      }
+      searchFrom = markerPos - 1
+    }
+  }
+
   if (raw) {
     try {
       const parsed = JSON.parse(raw) as {
+        ok?: boolean
         servers?: CinemmServer[]
         remaining?: number
         error?: string
@@ -484,12 +549,31 @@ function parseMovieDetailsResponse(
       }))
       remaining = parsed.remaining ?? 0
       error = parsed.error ?? null
-      // Overview is a reference like "$10" pointing to the text chunk on line 10
+      // If the JSON has an overview reference (e.g. "$2"), resolve it.
       const overviewRef = parsed.overview
       if (typeof overviewRef === 'string' && overviewRef.startsWith('$')) {
-        overview = lines.get(overviewRef.substring(1)) ?? ''
-        const tMatch = overview.match(/^T[0-9a-f]+,(.*)$/s)
-        if (tMatch) overview = tMatch[1]
+        const refText = lines.get(overviewRef.substring(1)) ?? ''
+        const tMatch = refText.match(/^T[0-9a-f]+,(.*)$/s)
+        if (tMatch) {
+          // The overview text chunk may also have the glued JSON at the end.
+          // Strip it.
+          let cleaned = tMatch[1]
+          const gluedMarker = cleaned.lastIndexOf('1:{')
+          if (gluedMarker > 0) {
+            const afterGlued = cleaned.substring(gluedMarker + 2)
+            if (afterGlued.endsWith('}')) {
+              try {
+                JSON.parse(afterGlued)
+                cleaned = cleaned.substring(0, gluedMarker)
+              } catch {
+                // leave as is
+              }
+            }
+          }
+          overview = cleaned
+        } else {
+          overview = refText
+        }
       } else if (typeof overviewRef === 'string' && overviewRef !== '$undefined') {
         overview = overviewRef
       }
@@ -611,15 +695,18 @@ export async function getSeriesDetails(
     const { lines } = await callAction(ACTIONS.getSeriesDetails, [id, source], {
       visitorUuid: opts.visitorUuid,
     })
-    // Extract overview from line "10:" (text chunk) and seasons from line "1:"
-    let overview = lines.get('10') ?? ''
+    // Extract overview from line "2:" (new format) or line "10:" (old format).
+    // Try line 2 first, fall back to line 10.
+    let overview = lines.get('2') ?? lines.get('10') ?? ''
     const tMatch = overview.match(/^T[0-9a-f]+,(.*)$/s)
     if (tMatch) overview = tMatch[1]
     let seasonsJson = lines.get('1') ?? ''
     let seasons: CinemmSeason[] = []
     if (seasonsJson) {
       try {
-        const parsed = JSON.parse(seasonsJson) as { seasons?: CinemmSeason[] }
+        // New format: { ok: true, seasons: [...] }
+        // Old format: { seasons: [...] }
+        const parsed = JSON.parse(seasonsJson) as { ok?: boolean; seasons?: CinemmSeason[] }
         seasons = parsed.seasons ?? []
       } catch (e) {
         console.error('Failed to parse seasons JSON (UUID path):', e)
@@ -631,7 +718,7 @@ export async function getSeriesDetails(
   }
 
   let { lines } = await callAction(ACTIONS.getSeriesDetails, [id, source])
-  let overview = lines.get('10') ?? ''
+  let overview = lines.get('2') ?? lines.get('10') ?? ''
   // Strip "T<hex>," prefix if still attached
   const tMatch = overview.match(/^T[0-9a-f]+,(.*)$/s)
   if (tMatch) overview = tMatch[1]
@@ -640,13 +727,14 @@ export async function getSeriesDetails(
   // already have split it into line "1:" — but double-check in case.
   let seasonsJson = lines.get('1') ?? ''
 
-  // If we got an empty overview (likely QUOTA_EXCEEDED), try refreshing quota.
+  // If we got an empty overview (likely QUOTA_EXCEEDED — old behavior only),
+  // try refreshing quota. In the new format (no quota), this branch is rare.
   if (!overview) {
     const refreshed = await refreshVisitorQuota()
     if (refreshed && refreshed.remaining > 0) {
       const retry = await callAction(ACTIONS.getSeriesDetails, [id, source])
       lines = retry.lines
-      overview = retry.lines.get('10') ?? ''
+      overview = retry.lines.get('2') ?? retry.lines.get('10') ?? ''
       const tRetry = overview.match(/^T[0-9a-f]+,(.*)$/s)
       if (tRetry) overview = tRetry[1]
       seasonsJson = retry.lines.get('1') ?? ''
