@@ -158,25 +158,55 @@ function splitServers(servers: Server[]): {
   downloadLinks: ParsedDownloadLink[]
   watchLinks: ParsedWatchLink[]
 } {
-  const downloadLinks: ParsedDownloadLink[] = []
-  const watchLinks: ParsedWatchLink[] = []
+  // Group servers by URL. cinemm.com returns separate Stream and Download
+  // entries for the same URL, so we merge them: if both a "- Stream" and
+  // "- Download" entry share the same URL, we emit a single entry with a
+  // combined name like "Tube 1 (1080p) - Stream / Download".
+  const byUrl = new Map<
+    string,
+    { server: Server; quality: string; fileName: string; isStream: boolean; isDownload: boolean }
+  >()
   for (const s of servers) {
     const quality = parseQuality(s.name)
     const fileName = parseFileName(s.url)
-    const isDownload = s.name.toLowerCase().includes('download')
+    const nameLower = s.name.toLowerCase()
+    const isDownload = nameLower.includes('download')
+    const isStream = nameLower.includes('stream')
+    const existing = byUrl.get(s.url)
+    if (existing) {
+      // Merge: combine the isStream/isDownload flags
+      existing.isStream = existing.isStream || isStream
+      existing.isDownload = existing.isDownload || isDownload
+    } else {
+      byUrl.set(s.url, { server: s, quality, fileName, isStream, isDownload })
+    }
+  }
+
+  const downloadLinks: ParsedDownloadLink[] = []
+  const watchLinks: ParsedWatchLink[] = []
+  for (const { server, quality, fileName, isStream, isDownload } of byUrl.values()) {
+    // Build a combined server name: e.g. "Tube 1 (1080p) - Stream / Download"
+    // Strip the existing "- Stream" / "- Download" suffix first.
+    const baseName = server.name.replace(/\s*-\s*(Stream|Download)\s*$/i, '').trim()
+    const types: string[] = []
+    if (isStream) types.push('Stream')
+    if (isDownload) types.push('Download')
+    const combinedName = types.length > 0 ? `${baseName} - ${types.join(' / ')}` : baseName
+
     if (isDownload) {
       downloadLinks.push({
-        serverName: s.name,
-        url: s.url,
-        size: s.size,
+        serverName: combinedName,
+        url: server.url,
+        size: server.size,
         quality,
         fileName,
       })
-    } else {
+    }
+    if (isStream) {
       watchLinks.push({
-        serverName: s.name,
-        url: s.url,
-        size: s.size,
+        serverName: combinedName,
+        url: server.url,
+        size: server.size,
         quality,
       })
     }
