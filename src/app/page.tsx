@@ -1,7 +1,7 @@
 'use client'
 
-import { useState, useCallback, useEffect, useMemo } from 'react'
-import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight, ArrowLeft, KeyRound, Settings, Plus } from 'lucide-react'
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
+import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight, ArrowLeft, KeyRound, Settings, Plus, Zap } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -351,6 +351,10 @@ export default function Home() {
   const [episodeServers, setEpisodeServers] = useState<Map<number, Server[]>>(new Map())
   const [episodeServersLoading, setEpisodeServersLoading] = useState<Set<number>>(new Set())
   const [episodeServersError, setEpisodeServersError] = useState<Set<number>>(new Set())
+  // Ref mirror of episodeServers so async loops (like Auto Open All) can read
+  // the latest value without stale-closure issues. Updated in an effect.
+  const episodeServersRef = useRef(episodeServers)
+  useEffect(() => { episodeServersRef.current = episodeServers }, [episodeServers])
   const [expandedSeasons, setExpandedSeasons] = useState<Set<number>>(new Set())
   const [selectedEpisode, setSelectedEpisode] = useState<number | null>(null)
 
@@ -721,6 +725,19 @@ export default function Home() {
     })
   }, [])
 
+  // Expand all seasons at once (used by the "Auto Open All" button).
+  const expandAllSeasons = useCallback(() => {
+    setExpandedSeasons((prev) => {
+      const next = new Set(prev)
+      if (details?.type === 'series') {
+        for (const s of (details as SeriesDetails).seasons) {
+          next.add(s.id)
+        }
+      }
+      return next
+    })
+  }, [details])
+
   // Look up the real TMDB ID for the currently-open post. (Inlined in
   // openDetails above; this space kept intentionally blank.)
 
@@ -771,16 +788,18 @@ export default function Home() {
 
   const handleDownloadJson = useCallback(() => {
     if (!selected) return
-    const payload = buildJsonPayload(selected, details, episodeServers, manualDownloadLinks, manualWatchLinks, tmdbId)
+    // Use the ref to get the latest episode servers (avoids stale closure
+    // when called right after Auto Open All finishes).
+    const payload = buildJsonPayload(selected, details, episodeServersRef.current, manualDownloadLinks, manualWatchLinks, tmdbId)
     const name = sanitizeFilename(selected.name || `id-${selected.id}`)
     const year = selected.year || 'unknown'
     downloadJson(`${name}_${year}_${selected.type}_${selected.id}.json`, payload)
     toast.success('JSON downloaded')
-  }, [selected, details, episodeServers, manualDownloadLinks, manualWatchLinks, tmdbId])
+  }, [selected, details, manualDownloadLinks, manualWatchLinks, tmdbId])
 
   const handleCopyJson = useCallback(async () => {
     if (!selected) return
-    const payload = buildJsonPayload(selected, details, episodeServers, manualDownloadLinks, manualWatchLinks, tmdbId)
+    const payload = buildJsonPayload(selected, details, episodeServersRef.current, manualDownloadLinks, manualWatchLinks, tmdbId)
     try {
       await navigator.clipboard.writeText(JSON.stringify(payload, null, 2))
       setCopied(true)
@@ -789,7 +808,7 @@ export default function Home() {
     } catch {
       toast.error('Copy failed')
     }
-  }, [selected, details, episodeServers, manualDownloadLinks, manualWatchLinks, tmdbId])
+  }, [selected, details, manualDownloadLinks, manualWatchLinks, tmdbId])
 
   return (
     <div className="min-h-screen flex flex-col bg-zinc-950 text-zinc-100">
@@ -1234,6 +1253,7 @@ export default function Home() {
               onToggleSeason={toggleSeason}
               onFetchEpisodeServers={fetchEpisodeServers}
               onSelectEpisode={setSelectedEpisode}
+              onExpandAllSeasons={expandAllSeasons}
             />
           )}
 
@@ -1344,6 +1364,7 @@ interface DetailsViewProps {
   onToggleSeason: (seasonId: number) => void
   onFetchEpisodeServers: (episodeId: number, source: string) => void
   onSelectEpisode: (episodeId: number | null) => void
+  onExpandAllSeasons: () => void
 }
 
 function DetailsView({
@@ -1357,11 +1378,45 @@ function DetailsView({
   onToggleSeason,
   onFetchEpisodeServers,
   onSelectEpisode,
+  onExpandAllSeasons,
 }: DetailsViewProps) {
   const hasServers = details.type === 'movie' && details.servers.length > 0
   const hasSeasons = details.type === 'series' && details.seasons.length > 0
   const hasOverview = !!details.overview
   const isQuotaExceeded = details.error === 'QUOTA_EXCEEDED'
+
+  // Auto-fetch all episodes state. When user clicks "Auto Open All", we
+  // expand all seasons and fetch servers for every episode sequentially.
+  // `useState` is fine here because DetailsView is re-mounted per post.
+  const [autoFetching, setAutoFetching] = useState(false)
+  const [autoFetchProgress, setAutoFetchProgress] = useState<{ done: number; total: number } | null>(null)
+
+  const allEpisodes =
+    hasSeasons
+      ? (details as SeriesDetails).seasons.flatMap((s) => s.episodes)
+      : []
+
+  const handleAutoOpenAll = async () => {
+    if (autoFetching || allEpisodes.length === 0) return
+    setAutoFetching(true)
+    // Expand all seasons so episodes are visible
+    onExpandAllSeasons()
+    const total = allEpisodes.length
+    setAutoFetchProgress({ done: 0, total })
+    let done = 0
+    for (const ep of allEpisodes) {
+      // Skip episodes that are already loaded or currently loading
+      if (!episodeServers.has(ep.id) && !episodeServersLoading.has(ep.id)) {
+        onFetchEpisodeServers(ep.id, item.source)
+        // Small delay to avoid overwhelming the server
+        await new Promise((r) => setTimeout(r, 300))
+      }
+      done++
+      setAutoFetchProgress({ done, total })
+    }
+    setAutoFetching(false)
+    setAutoFetchProgress(null)
+  }
   const hasPartialInfo = !hasServers && !hasSeasons && !hasOverview
   const isIpRateLimited = details.error === 'IP_RATE_LIMITED'
 
@@ -1482,12 +1537,45 @@ function DetailsView({
       {/* Seasons/episodes tree (series) */}
       {hasSeasons && (
         <section>
-          <h3 className="text-sm font-semibold text-zinc-200 mb-2 flex items-center gap-2">
-            <Tv className="w-4 h-4" /> Seasons &amp; Episodes
-            <Badge variant="outline" className="border-zinc-700 text-zinc-400 ml-1">
-              {(details as SeriesDetails).seasons.reduce((acc, s) => acc + s.episodes.length, 0)} episodes
-            </Badge>
-          </h3>
+          <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
+            <h3 className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
+              <Tv className="w-4 h-4" /> Seasons &amp; Episodes
+              <Badge variant="outline" className="border-zinc-700 text-zinc-400 ml-1">
+                {(details as SeriesDetails).seasons.reduce((acc, s) => acc + s.episodes.length, 0)} episodes
+              </Badge>
+            </h3>
+            <Button
+              size="sm"
+              onClick={handleAutoOpenAll}
+              disabled={autoFetching || allEpisodes.length === 0}
+              className="bg-purple-600 hover:bg-purple-700 text-white text-xs h-7"
+            >
+              {autoFetching ? (
+                <>
+                  <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                  {autoFetchProgress ? `${autoFetchProgress.done}/${autoFetchProgress.total}` : 'Loading…'}
+                </>
+              ) : (
+                <>
+                  <Zap className="w-3 h-3 mr-1" />
+                  Auto Open All
+                </>
+              )}
+            </Button>
+          </div>
+          {autoFetching && autoFetchProgress && (
+            <div className="mb-2">
+              <div className="h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-purple-600 transition-all"
+                  style={{ width: `${(autoFetchProgress.done / autoFetchProgress.total) * 100}%` }}
+                />
+              </div>
+              <p className="text-xs text-zinc-500 mt-1">
+                Fetching servers for episode {autoFetchProgress.done} of {autoFetchProgress.total}…
+              </p>
+            </div>
+          )}
           <div className="space-y-1.5 max-h-[28rem] overflow-y-auto pr-1">
             {(details as SeriesDetails).seasons.map((season) => {
               const isExpanded = expandedSeasons.has(season.id)
