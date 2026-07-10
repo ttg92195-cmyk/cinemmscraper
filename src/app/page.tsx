@@ -694,6 +694,8 @@ export default function Home() {
       }
       if (fetched.error === 'IP_RATE_LIMITED') {
         toast.error('cinemm.com IP rate-limited. Try a VPN, switch network, or wait ~1 hour.', { duration: 8000 })
+      } else if (fetched.error === 'RATE_LIMITED') {
+        toast.warning('cinemm.com rate-limited — too many requests. Please wait a moment and try again.', { duration: 6000 })
       } else if (fetched.error === 'QUOTA_EXCEEDED') {
         toast.warning('cinemm.com quota exceeded — showing partial data. JSON download still works.')
       } else if (fetched.error) {
@@ -1467,6 +1469,7 @@ function DetailsView({
   }
   const hasPartialInfo = !hasServers && !hasSeasons && !hasOverview
   const isIpRateLimited = details.error === 'IP_RATE_LIMITED'
+  const isRateLimited = details.error === 'RATE_LIMITED'
 
   return (
     <div className="space-y-5">
@@ -1525,7 +1528,18 @@ function DetailsView({
               </div>
             </div>
           )}
-          {details.error && details.error !== 'QUOTA_EXCEEDED' && details.error !== 'IP_RATE_LIMITED' && (
+          {isRateLimited && (
+            <div className="mt-2 p-2 rounded border border-amber-900/50 bg-amber-950/30 text-amber-200 text-xs flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+              <div>
+                <div className="font-semibold">cinemm.com rate-limited</div>
+                <div className="text-amber-300/80 mt-0.5">
+                  Too many requests. Please wait a moment and try again — the content will load normally.
+                </div>
+              </div>
+            </div>
+          )}
+          {details.error && details.error !== 'QUOTA_EXCEEDED' && details.error !== 'IP_RATE_LIMITED' && details.error !== 'RATE_LIMITED' && (
             <div className="mt-2 p-2 rounded border border-amber-900/50 bg-amber-950/30 text-amber-200 text-xs flex items-start gap-2">
               <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
               <div>
@@ -1694,7 +1708,7 @@ function DetailsView({
       )}
 
       {/* Partial info fallback */}
-      {hasPartialInfo && !isQuotaExceeded && !details.error && (
+      {hasPartialInfo && !isQuotaExceeded && !isIpRateLimited && !isRateLimited && !details.error && (
         <div className="text-center py-8 text-zinc-500 text-sm">
           No detailed content available for this item. You can still download the basic info as JSON.
         </div>

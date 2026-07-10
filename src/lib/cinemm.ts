@@ -538,10 +538,15 @@ function parseMovieDetailsResponse(
     try {
       const parsed = JSON.parse(raw) as {
         ok?: boolean
+        message?: string
         servers?: CinemmServer[]
         remaining?: number
         error?: string
         overview?: string
+      }
+      // Check for rate-limit response: { ok: false, message: "Too many requests..." }
+      if (parsed.ok === false && parsed.message) {
+        error = 'RATE_LIMITED'
       }
       servers = (parsed.servers ?? []).map((s) => ({
         ...s,
