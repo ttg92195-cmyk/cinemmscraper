@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
-import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight, ArrowLeft, KeyRound, Settings, Plus, Zap } from 'lucide-react'
+import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight, ArrowLeft, KeyRound, Settings, Plus, Zap, ChevronLeft } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -1276,6 +1276,39 @@ export default function Home() {
               <ArrowLeft className="w-4 h-4" />
               <span className="ml-2">Back to search</span>
             </Button>
+            {/* Next / Previous buttons — let user jump between search results
+                without going back to the search page. */}
+            {results && results.length > 1 && (() => {
+              const currentIdx = results.findIndex(r => r.id === selected.id)
+              if (currentIdx === -1) return null
+              const prevItem = currentIdx > 0 ? results[currentIdx - 1] : null
+              const nextItem = currentIdx < results.length - 1 ? results[currentIdx + 1] : null
+              return (
+                <div className="flex items-center gap-1">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={!prevItem || detailsLoading}
+                    onClick={() => prevItem && openDetails(prevItem)}
+                    className="bg-zinc-900 border-zinc-700 hover:bg-zinc-800 text-zinc-100"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                  </Button>
+                  <span className="text-xs text-zinc-500 px-1">
+                    {currentIdx + 1} / {results.length}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={!nextItem || detailsLoading}
+                    onClick={() => nextItem && openDetails(nextItem)}
+                    className="bg-zinc-900 border-zinc-700 hover:bg-zinc-800 text-zinc-100"
+                  >
+                    <ChevronRight className="w-4 h-4" />
+                  </Button>
+                </div>
+              )
+            })()}
             <h2 className="text-xl font-bold flex items-center gap-2 flex-wrap">
               {selected.name}
               {selected.year && <span className="text-zinc-500 text-base font-normal">({selected.year})</span>}
