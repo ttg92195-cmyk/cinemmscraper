@@ -538,14 +538,17 @@ export default function Home() {
             if (fetched.type === 'series' && (fetched as SeriesDetails).seasons.length > 0) {
               setExpandedSeasons(new Set([(fetched as SeriesDetails).seasons[0].id]))
             }
-            if (tmdbApiKey && item.name) {
+            // TMDB lookup — read API key directly from localStorage (not state)
+            // because the state might not be populated yet on initial page load.
+            const storedTmdbKey = window.localStorage.getItem('cinemm_tmdb_api_key')
+            if (storedTmdbKey && item.name) {
               setTmdbIdLoading(true)
               try {
                 const tmdbUrl = new URL('/api/tmdb-id', window.location.origin)
                 tmdbUrl.searchParams.set('name', item.name)
                 tmdbUrl.searchParams.set('year', item.year)
                 tmdbUrl.searchParams.set('type', item.type)
-                tmdbUrl.searchParams.set('apiKey', tmdbApiKey)
+                tmdbUrl.searchParams.set('apiKey', storedTmdbKey)
                 const tmdbRes = await fetch(tmdbUrl.toString())
                 const tmdbData = (await tmdbRes.json()) as { tmdbId?: number | null; error?: string }
                 if (tmdbRes.ok) setTmdbId(tmdbData.tmdbId ?? null)
