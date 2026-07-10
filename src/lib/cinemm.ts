@@ -16,7 +16,7 @@
  * "T" chunks and are referenced from the JSON as "$<id>".
  */
 
-import { db } from '@/lib/db'
+import { getCache, setCache } from '@/lib/cache'
 
 const CINEMM_ORIGIN = 'https://cinemm.com'
 
@@ -394,29 +394,17 @@ async function refreshVisitorQuota(): Promise<VisitorInfo | null> {
 }
 
 // ---------------------------------------------------------------------------
-// Cache helpers
+// Cache helpers — thin wrappers around the in-memory cache module.
+// Kept as function names (getCached/setCached) so the rest of the file
+// doesn't need to change.
 // ---------------------------------------------------------------------------
 
 async function getCached<T>(key: string): Promise<T | null> {
-  try {
-    const row = await db.cinemmCache.findUnique({ where: { cacheKey: key } })
-    if (!row) return null
-    return JSON.parse(row.payload) as T
-  } catch {
-    return null
-  }
+  return getCache<T>(key)
 }
 
 async function setCached<T>(key: string, value: T): Promise<void> {
-  try {
-    await db.cinemmCache.upsert({
-      where: { cacheKey: key },
-      create: { cacheKey: key, payload: JSON.stringify(value) },
-      update: { payload: JSON.stringify(value) },
-    })
-  } catch (e) {
-    console.error('Cache write failed:', e)
-  }
+  await setCache(key, value)
 }
 
 // ---------------------------------------------------------------------------

@@ -1,8 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Use standalone output for Vercel/Netlify deployment compatibility.
   output: "standalone",
-  /* config options here */
   typescript: {
     ignoreBuildErrors: true,
   },
