@@ -553,7 +553,8 @@ function parseMovieDetailsResponse(
         size: s.size ?? 'N/A',
       }))
       remaining = parsed.remaining ?? 0
-      error = parsed.error ?? null
+      // Only overwrite error if we haven't already set RATE_LIMITED
+      if (!error) error = parsed.error ?? null
       // If the JSON has an overview reference (e.g. "$2"), resolve it.
       const overviewRef = parsed.overview
       if (typeof overviewRef === 'string' && overviewRef.startsWith('$')) {
@@ -631,9 +632,10 @@ export async function getMovieDetails(
   }
 
   // Fetch with retry on rate-limit. cinemm.com now uses request rate-limiting
-  // (no more UUID/quota system). On RATE_LIMITED, wait 2s and retry up to 2 times.
+  // (no more UUID/quota system). On RATE_LIMITED, wait 3s then 5s and retry.
   let result: CinemmMovieDetails | null = null
-  for (let attempt = 0; attempt < 3; attempt++) {
+  const retryDelays = [3000, 5000]
+  for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
     const { lines } = await callAction(ACTIONS.getMovieServers, [id, source])
     result = parseMovieDetailsResponse(lines, { id, source, name, year, poster })
     // If we got real content, cache and return
@@ -642,8 +644,8 @@ export async function getMovieDetails(
       return result
     }
     // If rate-limited, wait and retry
-    if (result.error === 'RATE_LIMITED' && attempt < 2) {
-      await new Promise((r) => setTimeout(r, 2000))
+    if (result.error === 'RATE_LIMITED' && attempt < retryDelays.length) {
+      await new Promise((r) => setTimeout(r, retryDelays[attempt]))
       continue
     }
     // Other errors — return as-is
@@ -670,9 +672,9 @@ export async function getSeriesDetails(
     if (cached && cached.overview.length > 0) return cached
   }
 
-  // Fetch with retry on rate-limit. cinemm.com now uses request rate-limiting
-  // (no more UUID/quota system). On RATE_LIMITED, wait 2s and retry up to 2 times.
-  for (let attempt = 0; attempt < 3; attempt++) {
+  // Fetch with retry on rate-limit. On RATE_LIMITED, wait 3s then 5s and retry.
+  const retryDelays = [3000, 5000]
+  for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
     const { lines } = await callAction(ACTIONS.getSeriesDetails, [id, source])
 
     // Check for rate-limit response first
@@ -680,8 +682,8 @@ export async function getSeriesDetails(
     if (raw1) {
       try {
         const parsed = JSON.parse(raw1) as { ok?: boolean; message?: string }
-        if (parsed.ok === false && parsed.message && attempt < 2) {
-          await new Promise((r) => setTimeout(r, 2000))
+        if (parsed.ok === false && parsed.message && attempt < retryDelays.length) {
+          await new Promise((r) => setTimeout(r, retryDelays[attempt]))
           continue
         }
       } catch {
@@ -715,7 +717,7 @@ export async function getSeriesDetails(
     }
 
     // If rate-limited, wait and retry
-    if (result.error === 'RATE_LIMITED' && attempt < 2) {
+    if (result.error === "RATE_LIMITED" && attempt < retryDelays.length) {
       await new Promise((r) => setTimeout(r, 2000))
       continue
     }
@@ -792,8 +794,9 @@ export async function getEpisodeServers(
     if (cached && cached.servers.length > 0) return cached
   }
 
-  // Fetch with retry on rate-limit. On RATE_LIMITED, wait 1.5s and retry up to 2 times.
-  for (let attempt = 0; attempt < 3; attempt++) {
+  // Fetch with retry on rate-limit. On RATE_LIMITED, wait 2s then 4s and retry.
+  const epRetryDelays = [2000, 4000]
+  for (let attempt = 0; attempt <= epRetryDelays.length; attempt++) {
     const { lines } = await callAction(ACTIONS.getEpisodeServers, [episodeId, source])
     const result = parseEpisodeServersResponse(lines, episodeId)
     // If we got servers, cache and return
@@ -802,8 +805,8 @@ export async function getEpisodeServers(
       return result
     }
     // If rate-limited, wait and retry
-    if (result.error === 'RATE_LIMITED' && attempt < 2) {
-      await new Promise((r) => setTimeout(r, 1500))
+    if (result.error === 'RATE_LIMITED' && attempt < epRetryDelays.length) {
+      await new Promise((r) => setTimeout(r, epRetryDelays[attempt]))
       continue
     }
     // Other errors — return as-is
