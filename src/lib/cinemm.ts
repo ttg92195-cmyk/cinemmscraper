@@ -880,16 +880,22 @@ function parseEpisodeServersResponse(
   if (raw) {
     try {
       const parsed = JSON.parse(raw) as {
+        ok?: boolean
+        message?: string
         servers?: CinemmServer[]
         remaining?: number
         error?: string
+      }
+      // Check for rate-limit response: { ok: false, message: "Too many requests..." }
+      if (parsed.ok === false && parsed.message) {
+        error = 'RATE_LIMITED'
       }
       servers = (parsed.servers ?? []).map((s) => ({
         ...s,
         size: s.size ?? 'N/A',
       }))
       remaining = parsed.remaining ?? 0
-      error = parsed.error ?? null
+      if (!error) error = parsed.error ?? null
     } catch (e) {
       console.error('Failed to parse episode servers JSON:', e)
       error = 'PARSE_ERROR'
