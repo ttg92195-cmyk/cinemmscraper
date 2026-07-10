@@ -675,7 +675,7 @@ export default function Home() {
     } finally {
       setDetailsLoading(false)
     }
-  }, [])
+  }, [tmdbApiKey])
 
   const closeDetails = useCallback(() => {
     // Clear all detail-related state immediately so one click on "Back to
