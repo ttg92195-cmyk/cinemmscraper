@@ -24,9 +24,9 @@ const CINEMM_ORIGIN = 'https://cinemm.com'
 // after cinemm.com removed the UUID/quota system and changed all action IDs).
 const ACTIONS = {
   search:              '608174a38f0214642b8855d3d6393e4214494192e7',
-  getMovieServers:     '40b6fd00069a831ba6225e836a43f8bdd5987d4a22',
+  getMovieServers:     '402e0d2a031ab13c1a76181709d9303b8ca996c7c7', // renamed to getMovieDetailsAction
   getSeriesDetails:    '400fb0323d1f84386f54ce8b5ac06f35e7f98a363c',
-  getEpisodeServers:   '4040aab62cc485838fd326fadebc5d6fd74baf2f08',
+  getEpisodeServers:   '4040aab62cc485838fd326fadebc5d6fd74baf2f08', // may be removed — returns 404
 } as const
 
 const COMMON_HEADERS = {
