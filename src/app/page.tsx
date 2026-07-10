@@ -184,26 +184,23 @@ function splitServers(servers: Server[]): {
 
   const downloadLinks: ParsedDownloadLink[] = []
   const watchLinks: ParsedWatchLink[] = []
+  let serverIndex = 0
   for (const { server, quality, fileName, isStream, isDownload } of byUrl.values()) {
-    // Build a combined server name: e.g. "Tube 1 (1080p) - Stream / Download"
-    const baseName = server.name.replace(/\s*-\s*(Stream|Download)\s*$/i, '').trim()
-    const types: string[] = []
-    if (isStream) types.push('Stream')
-    if (isDownload) types.push('Download')
-    const combinedName = types.length > 0 ? `${baseName} - ${types.join(' / ')}` : baseName
+    serverIndex++
+    // Simple sequential name: "Server 1", "Server 2", "Server 3", ...
+    const simpleName = `Server ${serverIndex}`
 
     // Add to BOTH downloadLinks and watchLinks. Since cinemm.com uses the same
     // URL for both Stream and Download, every server can serve both purposes.
-    // This ensures Tube 1, Server 1, Cloud 1 all appear in both arrays.
     downloadLinks.push({
-      serverName: combinedName,
+      serverName: simpleName,
       url: server.url,
       size: server.size,
       quality,
       fileName,
     })
     watchLinks.push({
-      serverName: combinedName,
+      serverName: simpleName,
       url: server.url,
       size: server.size,
       quality,
