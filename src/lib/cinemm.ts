@@ -630,51 +630,26 @@ export async function getMovieDetails(
     }
   }
 
-  // If user supplied their own cinemm.com UUID, use it directly (no auto-refresh).
-  if (opts.visitorUuid) {
-    const { lines } = await callAction(ACTIONS.getMovieServers, [id, source], {
-      visitorUuid: opts.visitorUuid,
-    })
-    const result = parseMovieDetailsResponse(lines, { id, source, name, year, poster })
-    if (!result.error && (result.servers.length > 0 || result.overview.length > 0)) {
-      await setCached(key, result)
+  // Fetch with retry on rate-limit. cinemm.com now uses request rate-limiting
+  // (no more UUID/quota system). On RATE_LIMITED, wait 2s and retry up to 2 times.
+  let result: CinemmMovieDetails | null = null
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { lines } = await callAction(ACTIONS.getMovieServers, [id, source])
+    result = parseMovieDetailsResponse(lines, { id, source, name, year, poster })
+    // If we got real content, cache and return
+    if (result.servers.length > 0 || result.overview.length > 0) {
+      if (!result.error) await setCached(key, result)
+      return result
     }
+    // If rate-limited, wait and retry
+    if (result.error === 'RATE_LIMITED' && attempt < 2) {
+      await new Promise((r) => setTimeout(r, 2000))
+      continue
+    }
+    // Other errors — return as-is
     return result
   }
-
-  // Auto-refresh path: try, on QUOTA_EXCEEDED refresh UUID + retry.
-  let { lines } = await callAction(ACTIONS.getMovieServers, [id, source])
-  let raw = lines.get('1')
-  if (raw && JSON.parse(raw).error === 'QUOTA_EXCEEDED') {
-    const refreshed = await refreshVisitorQuota()
-    if (refreshed && refreshed.remaining > 0) {
-      const retry = await callAction(ACTIONS.getMovieServers, [id, source])
-      lines = retry.lines
-      raw = retry.lines.get('1')
-      topUpPoolInBackground()
-    } else {
-      return {
-        id,
-        name: name ?? '',
-        year: year ?? '',
-        poster: poster ?? '',
-        type: 'movie',
-        source,
-        overview: '',
-        servers: [],
-        remaining: 0,
-        error: 'IP_RATE_LIMITED',
-        fetchedAt: new Date().toISOString(),
-        sourceUrl: `${CINEMM_ORIGIN}/?search=${encodeURIComponent(name ?? '')}&type=movie`,
-      }
-    }
-  }
-
-  const result = parseMovieDetailsResponse(lines, { id, source, name, year, poster })
-  if (!result.error && (result.servers.length > 0 || result.overview.length > 0)) {
-    await setCached(key, result)
-  }
-  return result
+  return result!
 }
 
 /**
@@ -695,89 +670,75 @@ export async function getSeriesDetails(
     if (cached && cached.overview.length > 0) return cached
   }
 
-  // If user supplied their own cinemm.com UUID, use it directly (no auto-refresh).
-  if (opts.visitorUuid) {
-    const { lines } = await callAction(ACTIONS.getSeriesDetails, [id, source], {
-      visitorUuid: opts.visitorUuid,
-    })
+  // Fetch with retry on rate-limit. cinemm.com now uses request rate-limiting
+  // (no more UUID/quota system). On RATE_LIMITED, wait 2s and retry up to 2 times.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { lines } = await callAction(ACTIONS.getSeriesDetails, [id, source])
+
+    // Check for rate-limit response first
+    const raw1 = lines.get('1') ?? ''
+    if (raw1) {
+      try {
+        const parsed = JSON.parse(raw1) as { ok?: boolean; message?: string }
+        if (parsed.ok === false && parsed.message && attempt < 2) {
+          await new Promise((r) => setTimeout(r, 2000))
+          continue
+        }
+      } catch {
+        // Not a rate-limit response, continue parsing
+      }
+    }
+
     // Extract overview from line "2:" (new format) or line "10:" (old format).
-    // Try line 2 first, fall back to line 10.
     let overview = lines.get('2') ?? lines.get('10') ?? ''
     const tMatch = overview.match(/^T[0-9a-f]+,(.*)$/s)
     if (tMatch) overview = tMatch[1]
-    let seasonsJson = lines.get('1') ?? ''
+
+    // Parse seasons from line "1:"
+    let seasonsJson = raw1
     let seasons: CinemmSeason[] = []
     if (seasonsJson) {
       try {
-        // New format: { ok: true, seasons: [...] }
-        // Old format: { seasons: [...] }
         const parsed = JSON.parse(seasonsJson) as { ok?: boolean; seasons?: CinemmSeason[] }
         seasons = parsed.seasons ?? []
       } catch (e) {
-        console.error('Failed to parse seasons JSON (UUID path):', e)
+        console.error('Failed to parse seasons JSON:', e)
       }
     }
+
     const result = parseSeriesDetailsResponse(lines, { id, source, name, year, poster }, overview, seasons)
-    if (result.overview || result.seasons.length > 0) await setCached(key, result)
+
+    // If we got real content, cache and return
+    if (result.overview || result.seasons.length > 0) {
+      if (!result.error) await setCached(key, result)
+      return result
+    }
+
+    // If rate-limited, wait and retry
+    if (result.error === 'RATE_LIMITED' && attempt < 2) {
+      await new Promise((r) => setTimeout(r, 2000))
+      continue
+    }
+
+    // Other errors — return as-is
     return result
   }
 
-  let { lines } = await callAction(ACTIONS.getSeriesDetails, [id, source])
-  let overview = lines.get('2') ?? lines.get('10') ?? ''
-  // Strip "T<hex>," prefix if still attached
-  const tMatch = overview.match(/^T[0-9a-f]+,(.*)$/s)
-  if (tMatch) overview = tMatch[1]
-  // The seasons JSON return value (line "1:") is glued to the end of the
-  // overview text by cinemm.com's buggy RSC serializer. The parser should
-  // already have split it into line "1:" — but double-check in case.
-  let seasonsJson = lines.get('1') ?? ''
-
-  // If we got an empty overview (likely QUOTA_EXCEEDED — old behavior only),
-  // try refreshing quota. In the new format (no quota), this branch is rare.
-  if (!overview) {
-    const refreshed = await refreshVisitorQuota()
-    if (refreshed && refreshed.remaining > 0) {
-      const retry = await callAction(ACTIONS.getSeriesDetails, [id, source])
-      lines = retry.lines
-      overview = retry.lines.get('2') ?? retry.lines.get('10') ?? ''
-      const tRetry = overview.match(/^T[0-9a-f]+,(.*)$/s)
-      if (tRetry) overview = tRetry[1]
-      seasonsJson = retry.lines.get('1') ?? ''
-      topUpPoolInBackground()
-    } else {
-      // Pool drained AND IP is rate-limited. Surface a clearer error.
-      return {
-        id,
-        name: name ?? '',
-        year: year ?? '',
-        poster: poster ?? '',
-        type: 'series',
-        source,
-        overview: '',
-        seasons: [],
-        remaining: 0,
-        error: 'IP_RATE_LIMITED',
-        fetchedAt: new Date().toISOString(),
-        sourceUrl: `${CINEMM_ORIGIN}/?search=${encodeURIComponent(name ?? '')}&type=series`,
-      }
-    }
+  // Fallback (shouldn't reach here)
+  return {
+    id,
+    name: name ?? '',
+    year: year ?? '',
+    poster: poster ?? '',
+    type: 'series',
+    source,
+    overview: '',
+    seasons: [],
+    remaining: 0,
+    error: 'RATE_LIMITED',
+    fetchedAt: new Date().toISOString(),
+    sourceUrl: `${CINEMM_ORIGIN}/?search=${encodeURIComponent(name ?? '')}&type=series`,
   }
-
-  // Parse seasons structure from the JSON return value on line "1:".
-  // The action returns: { seasons: [...], overview: "$<refId>" }
-  let seasons: CinemmSeason[] = []
-  if (seasonsJson) {
-    try {
-      const parsed = JSON.parse(seasonsJson) as { seasons?: CinemmSeason[] }
-      seasons = parsed.seasons ?? []
-    } catch (e) {
-      console.error('Failed to parse seasons JSON:', e)
-    }
-  }
-
-  const result = parseSeriesDetailsResponse(lines, { id, source, name, year, poster }, overview, seasons)
-  if (result.overview || result.seasons.length > 0) await setCached(key, result)
-  return result
 }
 
 /**
@@ -831,41 +792,31 @@ export async function getEpisodeServers(
     if (cached && cached.servers.length > 0) return cached
   }
 
-  // If user supplied their own cinemm.com UUID, use it directly (no auto-refresh).
-  if (opts.visitorUuid) {
-    const { lines } = await callAction(ACTIONS.getEpisodeServers, [episodeId, source], {
-      visitorUuid: opts.visitorUuid,
-    })
+  // Fetch with retry on rate-limit. On RATE_LIMITED, wait 1.5s and retry up to 2 times.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { lines } = await callAction(ACTIONS.getEpisodeServers, [episodeId, source])
     const result = parseEpisodeServersResponse(lines, episodeId)
-    if (!result.error && result.servers.length > 0) await setCached(key, result)
+    // If we got servers, cache and return
+    if (result.servers.length > 0) {
+      if (!result.error) await setCached(key, result)
+      return result
+    }
+    // If rate-limited, wait and retry
+    if (result.error === 'RATE_LIMITED' && attempt < 2) {
+      await new Promise((r) => setTimeout(r, 1500))
+      continue
+    }
+    // Other errors — return as-is
     return result
   }
-
-  let { lines } = await callAction(ACTIONS.getEpisodeServers, [episodeId, source])
-  let raw = lines.get('1')
-  // If QUOTA_EXCEEDED, refresh visitor and retry once.
-  if (raw && JSON.parse(raw).error === 'QUOTA_EXCEEDED') {
-    const refreshed = await refreshVisitorQuota()
-    if (refreshed && refreshed.remaining > 0) {
-      const retry = await callAction(ACTIONS.getEpisodeServers, [episodeId, source])
-      lines = retry.lines
-      raw = retry.lines.get('1')
-      topUpPoolInBackground()
-    } else {
-      // Pool drained AND IP is rate-limited. Surface a clearer error.
-      return {
-        episodeId,
-        servers: [],
-        remaining: 0,
-        error: 'IP_RATE_LIMITED',
-        fetchedAt: new Date().toISOString(),
-      }
-    }
+  // Fallback
+  return {
+    episodeId,
+    servers: [],
+    remaining: 0,
+    error: 'RATE_LIMITED',
+    fetchedAt: new Date().toISOString(),
   }
-
-  const result = parseEpisodeServersResponse(lines, episodeId)
-  if (!result.error && result.servers.length > 0) await setCached(key, result)
-  return result
 }
 
 /** Parse the RSC response from getEpisodeServersAction into CinemmEpisodeDetails. */
