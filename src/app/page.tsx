@@ -565,8 +565,22 @@ export default function Home() {
       setError(null)
       setResults(null)
       try {
-        // Browser-side fetch: uses the user's IP, not the server's IP.
-        const { items, cached } = await searchCinemmBrowser(q, mediaType)
+        // Browser-side fetch first (user's IP). Falls back to server API
+        // if CORS blocks the request.
+        let items: SearchItem[] = []
+        let cached = false
+        const browserResult = await searchCinemmBrowser(q, mediaType)
+        if (browserResult.items.length > 0) {
+          items = browserResult.items
+          cached = browserResult.cached
+        } else {
+          // Fallback to server-side API
+          const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&type=${mediaType}`)
+          const data = await res.json()
+          if (!res.ok) throw new Error(data.error || `Search failed (${res.status})`)
+          items = data.items
+          cached = !!data.cached
+        }
         setResults(items)
         setCachedSearch(cached)
         if (items.length === 0) {
