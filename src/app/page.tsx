@@ -1460,6 +1460,7 @@ export default function Home() {
               onFetchEpisodeServers={fetchEpisodeServers}
               onSelectEpisode={setSelectedEpisode}
               onExpandAllSeasons={expandAllSeasons}
+              tgBotUrl={tgBotUrl}
             />
           )}
 
@@ -1571,6 +1572,7 @@ interface DetailsViewProps {
   onFetchEpisodeServers: (episodeId: number, source: string) => void
   onSelectEpisode: (episodeId: number | null) => void
   onExpandAllSeasons: () => void
+  tgBotUrl: string | null
 }
 
 function DetailsView({
@@ -1585,6 +1587,7 @@ function DetailsView({
   onFetchEpisodeServers,
   onSelectEpisode,
   onExpandAllSeasons,
+  tgBotUrl,
 }: DetailsViewProps) {
   const hasServers = details.type === 'movie' && details.servers.length > 0
   const hasSeasons = details.type === 'series' && details.seasons.length > 0
