@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
-import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight, ArrowLeft, KeyRound, Settings, Plus, Zap, ChevronLeft, Send } from 'lucide-react'
+import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight, ArrowLeft, KeyRound, Settings, Plus, Zap, ChevronLeft, Send, Upload } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -1589,6 +1589,8 @@ export default function Home() {
             onRemoveDownloadLink={(i) => setManualDownloadLinks((prev) => prev.filter((_, idx) => idx !== i))}
             onAddWatchLink={(link) => setManualWatchLinks((prev) => [...prev, link])}
             onRemoveWatchLink={(i) => setManualWatchLinks((prev) => prev.filter((_, idx) => idx !== i))}
+            onImportDownloadLinks={(links) => setManualDownloadLinks((prev) => [...prev, ...links])}
+            onImportWatchLinks={(links) => setManualWatchLinks((prev) => [...prev, ...links])}
           />
 
           {/* Footer actions (sticky at bottom of detail page) */}
@@ -2151,6 +2153,8 @@ interface ManualLinksEditorProps {
   onRemoveDownloadLink: (index: number) => void
   onAddWatchLink: (link: ParsedWatchLink) => void
   onRemoveWatchLink: (index: number) => void
+  onImportDownloadLinks: (links: ParsedDownloadLink[]) => void
+  onImportWatchLinks: (links: ParsedWatchLink[]) => void
 }
 
 function ManualLinksEditor({
@@ -2160,8 +2164,11 @@ function ManualLinksEditor({
   onRemoveDownloadLink,
   onAddWatchLink,
   onRemoveWatchLink,
+  onImportDownloadLinks,
+  onImportWatchLinks,
 }: ManualLinksEditorProps) {
   const [expanded, setExpanded] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Form state for a new download link
   const [dlServerName, setDlServerName] = useState('')
@@ -2204,6 +2211,63 @@ function ManualLinksEditor({
     setWlSize('')
   }
 
+  // JSON Import — reads a JSON file and extracts downloadLinks/watchLinks.
+  // Supports multiple formats:
+  //   1. { movies: [{ downloadLinks: [...], watchLinks: [...] }] }  (our format)
+  //   2. { downloadLinks: [...], watchLinks: [...] }                (simple)
+  //   3. [{ serverName, url, ... }]                                 (array only)
+  const handleImportJson = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      try {
+        const json = JSON.parse(ev.target?.result as string)
+        let dlLinks: ParsedDownloadLink[] = []
+        let wlLinks: ParsedWatchLink[] = []
+
+        // Format 1: { movies: [{ downloadLinks, watchLinks }] }
+        if (json.movies && Array.isArray(json.movies)) {
+          for (const m of json.movies) {
+            if (m.downloadLinks) dlLinks.push(...m.downloadLinks)
+            if (m.watchLinks) wlLinks.push(...m.watchLinks)
+          }
+        }
+        // Format 2: { downloadLinks, watchLinks }
+        else if (json.downloadLinks || json.watchLinks) {
+          if (json.downloadLinks) dlLinks.push(...json.downloadLinks)
+          if (json.watchLinks) wlLinks.push(...json.watchLinks)
+        }
+        // Format 3: plain array
+        else if (Array.isArray(json)) {
+          dlLinks = json.map((l: Record<string, unknown>) => ({
+            serverName: (l.serverName as string) || 'Imported',
+            url: (l.url as string) || '',
+            size: (l.size as string) || 'N/A',
+            quality: (l.quality as string) || 'Unknown',
+            fileName: (l.fileName as string) || '',
+          })).filter((l: ParsedDownloadLink) => l.url)
+          wlLinks = dlLinks.map((l) => ({ serverName: l.serverName, url: l.url, size: l.size, quality: l.quality }))
+        }
+
+        if (dlLinks.length > 0) onImportDownloadLinks(dlLinks)
+        if (wlLinks.length > 0) onImportWatchLinks(wlLinks)
+
+        const total = dlLinks.length + wlLinks.length
+        if (total > 0) {
+          toast.success(`Imported ${dlLinks.length} download + ${wlLinks.length} watch links`)
+        } else {
+          toast.error('No links found in JSON file')
+        }
+      } catch {
+        toast.error('Invalid JSON file')
+      }
+      // Reset file input so the same file can be selected again
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    }
+    reader.readAsText(file)
+  }
+
   return (
     <section className="mt-6">
       <button
@@ -2224,10 +2288,28 @@ function ManualLinksEditor({
 
       {expanded && (
         <div className="mt-2 space-y-4 border border-zinc-800 bg-zinc-900/40 rounded-md p-4">
-          <p className="text-xs text-zinc-400">
-            Add your own download or stream links here. They will be merged with the auto-fetched links in the JSON
-            output (manual links appear first).
-          </p>
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <p className="text-xs text-zinc-400">
+              Add your own download or stream links here. They will be merged with the auto-fetched links in the JSON
+              output (manual links appear first).
+            </p>
+            {/* JSON Import button */}
+            <Button
+              size="sm"
+              onClick={() => fileInputRef.current?.click()}
+              className="bg-blue-600 hover:bg-blue-700 text-white text-xs h-7"
+            >
+              <Upload className="w-3 h-3 mr-1" />
+              Import JSON
+            </Button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json,application/json"
+              onChange={handleImportJson}
+              className="hidden"
+            />
+          </div>
 
           {/* Download links section */}
           <div>
