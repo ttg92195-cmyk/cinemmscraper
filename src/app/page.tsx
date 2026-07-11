@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
-import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight, ArrowLeft, KeyRound, Settings, Plus, Zap, ChevronLeft } from 'lucide-react'
+import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight, ArrowLeft, KeyRound, Settings, Plus, Zap, ChevronLeft, Send } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -422,6 +422,12 @@ export default function Home() {
   const [tmdbIdLoading, setTmdbIdLoading] = useState(false)
   const [tmdbIdError, setTmdbIdError] = useState<string | null>(null)
 
+  // Telegram Bot URL (from localStorage). When set, a "Get Links via Telegram"
+  // button appears on the detail page that opens the bot with the movie/series
+  // name pre-filled as a query.
+  const [tgBotUrl, setTgBotUrl] = useState<string | null>(null)
+  const [tgBotInput, setTgBotInput] = useState('')
+
   // User-supplied cinemm.com visitor UUIDs (from localStorage). When present,
   // requests use the active UUID directly via the user_uuid cookie — bypassing
   // the auto-refresh path and its IP rate-limiting side effects.
@@ -470,6 +476,11 @@ export default function Home() {
     if (storedTmdbKey) {
       setTmdbApiKey(storedTmdbKey)
       setTmdbKeyInput(storedTmdbKey)
+    }
+    const storedTgBot = window.localStorage.getItem('cinemm_tg_bot_url')
+    if (storedTgBot) {
+      setTgBotUrl(storedTgBot)
+      setTgBotInput(storedTgBot)
     }
   }, [])
 
@@ -633,6 +644,26 @@ export default function Home() {
     setTmdbId(null)
     setTmdbIdError(null)
     toast.info('TMDB API key cleared — TMDB ID lookup disabled')
+  }, [])
+
+  const saveTgBotUrl = useCallback(() => {
+    const trimmed = tgBotInput.trim()
+    if (trimmed) {
+      window.localStorage.setItem('cinemm_tg_bot_url', trimmed)
+      setTgBotUrl(trimmed)
+      toast.success('Telegram Bot URL saved')
+    } else {
+      window.localStorage.removeItem('cinemm_tg_bot_url')
+      setTgBotUrl(null)
+      toast.info('Telegram Bot URL cleared')
+    }
+  }, [tgBotInput])
+
+  const clearTgBotUrl = useCallback(() => {
+    window.localStorage.removeItem('cinemm_tg_bot_url')
+    setTgBotUrl(null)
+    setTgBotInput('')
+    toast.info('Telegram Bot URL cleared')
   }, [])
 
   const onSubmit = useCallback(
@@ -1129,6 +1160,58 @@ export default function Home() {
                     <span className="text-green-400">TMDB ID lookup enabled</span>
                   ) : (
                     <span className="text-zinc-400">No API key — TMDB ID lookup disabled</span>
+                  )}
+                </p>
+              </div>
+
+              {/* Telegram Bot URL section */}
+              <div className="pt-3 border-t border-zinc-800 mt-3 space-y-3">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <ExternalLink className="w-4 h-4 text-purple-400" />
+                    <h4 className="text-sm font-semibold text-zinc-100">Telegram Bot URL</h4>
+                    {tgBotUrl && (
+                      <Badge variant="outline" className="border-green-900/50 text-green-400 text-xs">
+                        active
+                      </Badge>
+                    )}
+                  </div>
+                  {tgBotUrl && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={clearTgBotUrl}
+                      className="bg-zinc-900 border-zinc-700 hover:bg-zinc-800 text-zinc-100 text-xs"
+                    >
+                      Clear
+                    </Button>
+                  )}
+                </div>
+                <p className="text-xs text-zinc-400 leading-relaxed">
+                  Paste your Telegram Bot URL (e.g. <code className="px-1 py-0.5 bg-zinc-800 rounded text-zinc-200">https://t.me/CineMMBot</code>).
+                  When set, a &ldquo;Get Links via Telegram&rdquo; button will appear on each post detail page.
+                </p>
+                <div className="flex gap-2">
+                  <Input
+                    type="text"
+                    placeholder="https://t.me/YourBotName"
+                    value={tgBotInput}
+                    onChange={(e) => setTgBotInput(e.target.value)}
+                    className="bg-zinc-950 border-zinc-700 text-zinc-100 placeholder:text-zinc-600 focus-visible:ring-purple-500 font-mono text-sm"
+                  />
+                  <Button
+                    size="sm"
+                    onClick={saveTgBotUrl}
+                    className="bg-purple-600 hover:bg-purple-700 text-white"
+                  >
+                    Save
+                  </Button>
+                </div>
+                <p className="text-xs text-zinc-500">
+                  Status: {tgBotUrl ? (
+                    <span className="text-green-400">Telegram Bot link enabled</span>
+                  ) : (
+                    <span className="text-zinc-400">No URL — Telegram button hidden</span>
                   )}
                 </p>
               </div>
@@ -1634,6 +1717,18 @@ function DetailsView({
           >
             View on cinemm.com <ExternalLink className="w-3 h-3" />
           </a>
+          {/* Telegram Bot link — opens Telegram with the movie/series name */}
+          {tgBotUrl && (
+            <a
+              href={`${tgBotUrl}?start=${encodeURIComponent(item.name)}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium mt-2"
+            >
+              <Send className="w-3.5 h-3.5" />
+              Get Links via Telegram
+            </a>
+          )}
         </div>
       </div>
 
