@@ -428,6 +428,12 @@ export default function Home() {
   const [tgBotUrl, setTgBotUrl] = useState<string | null>(null)
   const [tgBotInput, setTgBotInput] = useState('')
 
+  // Batch selection — user can select multiple search results and download
+  // them as a single combined JSON file.
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  const [batchDownloading, setBatchDownloading] = useState(false)
+  const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null)
+
   // User-supplied cinemm.com visitor UUIDs (from localStorage). When present,
   // requests use the active UUID directly via the user_uuid cookie — bypassing
   // the auto-refresh path and its IP rate-limiting side effects.
@@ -907,6 +913,50 @@ export default function Home() {
   )
 
 
+  // Batch download — fetch details for all selected items and combine into
+  // a single JSON file.
+  const handleBatchDownload = useCallback(async () => {
+    if (!results || selectedIds.size === 0) return
+    setBatchDownloading(true)
+    const selectedItems = results.filter((r) => selectedIds.has(r.id))
+    setBatchProgress({ done: 0, total: selectedItems.length })
+    const movies: unknown[] = []
+    let done = 0
+    for (const item of selectedItems) {
+      try {
+        // Fetch details for this item
+        const url = new URL('/api/details', window.location.origin)
+        url.searchParams.set('id', String(item.id))
+        url.searchParams.set('type', item.type)
+        url.searchParams.set('source', item.source)
+        url.searchParams.set('name', item.name)
+        url.searchParams.set('year', item.year)
+        url.searchParams.set('poster', item.poster)
+        const res = await fetch(url.toString())
+        const data = await res.json()
+        const details = data as Details
+        // Build movie entry (same format as single download)
+        const payload = buildJsonPayload(item, details, undefined, [], [], null)
+        if (Array.isArray(payload.movies)) {
+          movies.push(payload.movies[0])
+        }
+        // Small delay to avoid rate-limit
+        await new Promise((r) => setTimeout(r, 500))
+      } catch {
+        // Skip failed items
+      }
+      done++
+      setBatchProgress({ done, total: selectedItems.length })
+    }
+    // Download combined JSON
+    const combined = { movies, batchDate: new Date().toISOString(), count: movies.length }
+    const name = `batch_${selectedItems.length}_items_${Date.now()}`
+    downloadJson(name + '.json', combined)
+    toast.success(`Downloaded ${movies.length} items as JSON`)
+    setBatchDownloading(false)
+    setBatchProgress(null)
+  }, [results, selectedIds])
+
   const handleDownloadJson = useCallback(() => {
     if (!selected) return
     // Use the ref to get the latest episode servers (avoids stale closure
@@ -1310,12 +1360,61 @@ export default function Home() {
 
         {!loading && results && results.length > 0 && (
           <>
-            <div className="text-sm text-zinc-400 mb-4">
-              {results.length} result{results.length === 1 ? '' : 's'} for <span className="text-zinc-200 font-medium">&ldquo;{query}&rdquo;</span>
+            <div className="flex items-center justify-between gap-2 mb-4 flex-wrap">
+              <div className="text-sm text-zinc-400">
+                {results.length} result{results.length === 1 ? '' : 's'} for <span className="text-zinc-200 font-medium">&ldquo;{query}&rdquo;</span>
+                {selectedIds.size > 0 && (
+                  <span className="ml-2 text-purple-400">({selectedIds.size} selected)</span>
+                )}
+              </div>
+              <div className="flex gap-2">
+                {selectedIds.size > 0 && (
+                  <Button
+                    size="sm"
+                    onClick={() => setSelectedIds(new Set())}
+                    className="bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs"
+                  >
+                    Clear selection
+                  </Button>
+                )}
+                {selectedIds.size > 0 && (
+                  <Button
+                    size="sm"
+                    onClick={handleBatchDownload}
+                    disabled={batchDownloading}
+                    className="bg-purple-600 hover:bg-purple-700 text-white text-xs"
+                  >
+                    {batchDownloading ? (
+                      <>
+                        <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                        {batchProgress ? `${batchProgress.done}/${batchProgress.total}` : 'Loading…'}
+                      </>
+                    ) : (
+                      <>
+                        <Download className="w-3 h-3 mr-1" />
+                        Download {selectedIds.size} as JSON
+                      </>
+                    )}
+                  </Button>
+                )}
+              </div>
             </div>
             <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 gap-2.5 sm:gap-3 md:gap-4">
               {results.map((item) => (
-                <ResultCard key={`${item.type}-${item.id}`} item={item} onClick={() => openDetails(item)} />
+                <ResultCard
+                  key={`${item.type}-${item.id}`}
+                  item={item}
+                  onClick={() => openDetails(item)}
+                  selected={selectedIds.has(item.id)}
+                  onToggleSelect={() => {
+                    setSelectedIds((prev) => {
+                      const next = new Set(prev)
+                      if (next.has(item.id)) next.delete(item.id)
+                      else next.add(item.id)
+                      return next
+                    })
+                  }}
+                />
               ))}
             </div>
           </>
@@ -1518,41 +1617,70 @@ export default function Home() {
 // Result card
 // ---------------------------------------------------------------------------
 
-function ResultCard({ item, onClick }: { item: SearchItem; onClick: () => void }) {
+function ResultCard({
+  item,
+  onClick,
+  selected = false,
+  onToggleSelect,
+}: {
+  item: SearchItem
+  onClick: () => void
+  selected?: boolean
+  onToggleSelect?: () => void
+}) {
   return (
-    <button
-      onClick={onClick}
-      className="group text-left rounded-md sm:rounded-lg overflow-hidden border border-zinc-800 bg-zinc-900 hover:border-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-600"
+    <div
+      className={`group relative rounded-md sm:rounded-lg overflow-hidden border bg-zinc-900 focus-within:ring-2 focus-within:ring-purple-600 ${
+        selected ? 'border-purple-600 ring-2 ring-purple-600/30' : 'border-zinc-800 hover:border-purple-600'
+      }`}
     >
-      <div className="aspect-[2/3] bg-zinc-800 relative overflow-hidden">
-        {item.poster ? (
-          <img
-            src={item.poster}
-            alt={item.name}
-            loading="lazy"
-            className="w-full h-full object-cover"
-            onError={(e) => {
-              ;(e.target as HTMLImageElement).style.display = 'none'
-            }}
-          />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center text-zinc-600">
-            <Film className="w-6 h-6 sm:w-8 sm:h-8" />
+      {/* Selection checkbox — top-left corner */}
+      {onToggleSelect && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onToggleSelect() }}
+          className={`absolute top-1 left-1 z-10 w-6 h-6 rounded-md flex items-center justify-center transition-colors ${
+            selected ? 'bg-purple-600 text-white' : 'bg-black/70 text-zinc-400 hover:text-white'
+          }`}
+          aria-label={selected ? 'Deselect' : 'Select'}
+        >
+          {selected ? <Check className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
+        </button>
+      )}
+      {/* Click area — opens detail page */}
+      <button
+        onClick={onClick}
+        className="w-full text-left"
+      >
+        <div className="aspect-[2/3] bg-zinc-800 relative overflow-hidden">
+          {item.poster ? (
+            <img
+              src={item.poster}
+              alt={item.name}
+              loading="lazy"
+              className="w-full h-full object-cover"
+              onError={(e) => {
+                ;(e.target as HTMLImageElement).style.display = 'none'
+              }}
+            />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center text-zinc-600">
+              <Film className="w-6 h-6 sm:w-8 sm:h-8" />
+            </div>
+          )}
+          {/* Type badge: small icon-only on mobile, with text on sm+ */}
+          <div className="absolute top-1 right-1 sm:top-2 sm:right-2">
+            <Badge variant="outline" className="bg-black/70 border-zinc-700 text-zinc-200 backdrop-blur-sm p-1 sm:p-0">
+              {item.type === 'movie' ? <Film className="w-2.5 h-2.5 sm:w-3 sm:h-3 sm:mr-1" /> : <Tv className="w-2.5 h-2.5 sm:w-3 sm:h-3 sm:mr-1" />}
+              <span className="hidden sm:inline">{item.type}</span>
+            </Badge>
           </div>
-        )}
-        {/* Type badge: small icon-only on mobile, with text on sm+ */}
-        <div className="absolute top-1 right-1 sm:top-2 sm:right-2">
-          <Badge variant="outline" className="bg-black/70 border-zinc-700 text-zinc-200 backdrop-blur-sm p-1 sm:p-0">
-            {item.type === 'movie' ? <Film className="w-2.5 h-2.5 sm:w-3 sm:h-3 sm:mr-1" /> : <Tv className="w-2.5 h-2.5 sm:w-3 sm:h-3 sm:mr-1" />}
-            <span className="hidden sm:inline">{item.type}</span>
-          </Badge>
         </div>
-      </div>
-      <div className="p-2 sm:p-3">
-        <h3 className="font-medium text-xs sm:text-sm leading-tight line-clamp-2 text-zinc-100">{item.name}</h3>
-        {item.year && <p className="text-[11px] sm:text-xs text-zinc-500 mt-1">{item.year}</p>}
-      </div>
-    </button>
+        <div className="p-2 sm:p-3">
+          <h3 className="font-medium text-xs sm:text-sm leading-tight line-clamp-2 text-zinc-100">{item.name}</h3>
+          {item.year && <p className="text-[11px] sm:text-xs text-zinc-500 mt-1">{item.year}</p>}
+        </div>
+      </button>
+    </div>
   )
 }
 
