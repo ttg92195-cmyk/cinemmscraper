@@ -922,6 +922,8 @@ export default function Home() {
     setBatchProgress({ done: 0, total: selectedItems.length })
     const movies: unknown[] = []
     let done = 0
+    // Read TMDB API key from localStorage for batch lookup
+    const storedTmdbKey = window.localStorage.getItem('cinemm_tmdb_api_key')
     for (const item of selectedItems) {
       try {
         // Fetch details for this item
@@ -935,8 +937,24 @@ export default function Home() {
         const res = await fetch(url.toString())
         const data = await res.json()
         const details = data as Details
-        // Build movie entry (same format as single download)
-        const payload = buildJsonPayload(item, details, undefined, [], [], null)
+        // TMDB ID lookup (if API key is set)
+        let resolvedTmdbId: number | null = null
+        if (storedTmdbKey && item.name) {
+          try {
+            const tmdbUrl = new URL('/api/tmdb-id', window.location.origin)
+            tmdbUrl.searchParams.set('name', item.name)
+            tmdbUrl.searchParams.set('year', item.year)
+            tmdbUrl.searchParams.set('type', item.type)
+            tmdbUrl.searchParams.set('apiKey', storedTmdbKey)
+            const tmdbRes = await fetch(tmdbUrl.toString())
+            const tmdbData = (await tmdbRes.json()) as { tmdbId?: number | null }
+            if (tmdbRes.ok) resolvedTmdbId = tmdbData.tmdbId ?? null
+          } catch {
+            // TMDB lookup failed — continue without it
+          }
+        }
+        // Build movie entry with TMDB ID
+        const payload = buildJsonPayload(item, details, undefined, [], [], resolvedTmdbId)
         if (Array.isArray(payload.movies)) {
           movies.push(payload.movies[0])
         }
