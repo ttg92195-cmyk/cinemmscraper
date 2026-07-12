@@ -579,6 +579,14 @@ function parseMovieDetailsResponse(
     error = 'NO_RETURN_VALUE'
   }
 
+  // If we got a valid response but no overview (cinemm.com's new format:
+  // overview: "$undefined"), don't treat it as an error — just return what
+  // we have. The UI will show "available via Telegram" if sourceAvailability
+  // is "available".
+  if (error === 'NO_RETURN_VALUE' && raw) {
+    error = null
+  }
+
   return {
     id: ctx.id,
     name: ctx.name ?? '',
@@ -619,27 +627,59 @@ export async function getMovieDetails(
     }
   }
 
-  // Fetch with retry on rate-limit. cinemm.com now uses request rate-limiting
-  // (no more UUID/quota system). On RATE_LIMITED, wait 3s then 5s and retry.
-  let result: CinemmMovieDetails | null = null
+  // cinemm.com's new format: getMovieDetailsAction returns overview + flags,
+  // getMovieSourcesAction returns servers (but currently empty — links moved
+  // to Telegram). We call both and merge the results.
   const retryDelays = [3000, 5000]
   for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
-    const { lines } = await callAction(ACTIONS.getMovieServers, [id, source])
-    result = parseMovieDetailsResponse(lines, { id, source, name, year, poster })
-    // If we got real content, cache and return
-    if (result.servers.length > 0 || result.overview.length > 0) {
-      if (!result.error) await setCached(key, result)
-      return result
-    }
+    // Call getMovieDetailsAction for overview
+    const { lines: detailsLines } = await callAction(ACTIONS.getMovieServers, [id, source])
+    const result = parseMovieDetailsResponse(detailsLines, { id, source, name, year, poster })
+    
     // If rate-limited, wait and retry
     if (result.error === 'RATE_LIMITED' && attempt < retryDelays.length) {
       await new Promise((r) => setTimeout(r, retryDelays[attempt]))
       continue
     }
-    // Other errors — return as-is
+    
+    // Also call getMovieSourcesAction for servers (currently returns empty,
+    // but may return servers in the future)
+    try {
+      const { lines: sourceLines } = await callAction(ACTIONS.getEpisodeServers, [id, source])
+      const sourceRaw = sourceLines.get('1')
+      if (sourceRaw) {
+        const sourceParsed = JSON.parse(sourceRaw) as { servers?: CinemmServer[] }
+        if (sourceParsed.servers && sourceParsed.servers.length > 0) {
+          result.servers = sourceParsed.servers.map((s) => ({
+            ...s,
+            size: s.size ?? 'N/A',
+          }))
+        }
+      }
+    } catch {
+      // Sources call failed — continue with details only
+    }
+    
+    // Return what we have — even if overview and servers are empty,
+    // the UI should show the movie info + Telegram button
+    if (!result.error) await setCached(key, result)
     return result
   }
-  return result!
+  // Fallback after all retries
+  return {
+    id,
+    name: name ?? '',
+    year: year ?? '',
+    poster: poster ?? '',
+    type: 'movie',
+    source,
+    overview: '',
+    servers: [],
+    remaining: 0,
+    error: 'RATE_LIMITED',
+    fetchedAt: new Date().toISOString(),
+    sourceUrl: `${CINEMM_ORIGIN}/?search=${encodeURIComponent(name ?? '')}&type=movie`,
+  }
 }
 
 /**
