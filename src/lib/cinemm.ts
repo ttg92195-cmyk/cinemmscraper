@@ -23,10 +23,10 @@ const CINEMM_ORIGIN = 'https://cinemm.com'
 // Server Action IDs (extracted from cinemm.com's bundled JS — updated 2026-07-10
 // after cinemm.com removed the UUID/quota system and changed all action IDs).
 const ACTIONS = {
-  search:              '608174a38f0214642b8855d3d6393e4214494192e7',
-  getMovieServers:     '403c32599fab6f6fc9cd1e855e768a31a40676e356', // getMovieSourcesAction (new!)
-  getSeriesDetails:    '400fb0323d1f84386f54ce8b5ac06f35e7f98a363c',
-  getEpisodeServers:   '6015ffa8542c372f6ea0234704feb2fc77d43db51d', // getEpisodeSourcesAction (new!)
+  search:              '608f37e00992dd40df0badde8f2f45e5db62a48046',
+  getMovieServers:     '60663b32ebac1369c06f990ebeed80f0ec3101d061', // getMovieDetailsAction
+  getSeriesDetails:    '40011a39f4c37fb76852c6cc01a17bd20e98784283',
+  getEpisodeServers:   '60bebae00379fff9c39e9dccf659b024a89da4b5b4', // getEpisodeSourcesAction
 } as const
 
 const COMMON_HEADERS = {
