@@ -219,3 +219,29 @@ Stage Summary:
 - နောက်ဆုံး စမ်းသပ်ဖို့: Railway deploy ပြီးရင်
   https://cinemmscraper-production.up.railway.app/api/scrape-movie?id=6611&type=movie&source=CM&name=Inception&year=2010
   response မှာ `method: "getDetails"` နဲ့ `overview` မှာ Myanmar text ပါမယ်။
+
+---
+Task ID: FINAL-VICTORY
+Agent: main (Super Z)
+Task: အပြည့်အစုံ အနိုင် confirm
+
+Work Log:
+- Railway deploy ပြီးနောက် test URL ကို ပြန်စမ်းကြည့်တယ်။
+- Response:
+  - method: "getDetails" ✅
+  - overview: 2,800+ chars Myanmar text (Inception ဇာတ်လမ်းအကျဉ်း အပြည့်အစုံ) ✅
+  - poster: cinemm.com URL ✅
+  - telegramLink: t.me link ✅
+  - error: null ✅
+  - attempts: ၂ ခုလုံး ok=true (poster-resolve + getDetails)
+
+Stage Summary:
+- Cat-and-mouse game 4 အဆင့် အောင်မြင်ခဲ့တယ်:
+  1. Search HTML scrape → SPA shell ပြဿနာ
+  2. Server Action ID တွေ ရှာ → အသစ်တွေ တွေ့
+  3. Action ID ပြန်ပြင် → overview="$undefined"
+  4. **JS bundle ထဲက client code ကို reverse-engineer** → boolean arg တွေ့
+- အဓိက key: getMovieDetailsAction(id, fetchOverview:boolean)
+- Browser rendering (Playwright/ScraperAPI) တွေ လုံးဝ မလိုတော့ဘူး။
+- Direct HTTP POST နဲ့ပဲ overview ရတယ်။
+- ဒါက ရေရှည် တည်ငြိမ်တဲ့ solution ဖြစ်တယ်။
