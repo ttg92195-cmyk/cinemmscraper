@@ -1868,10 +1868,10 @@ function DetailsView({
           >
             View on cinemm.com <ExternalLink className="w-3 h-3" />
           </a>
-          {/* Telegram Bot link — opens Telegram with the movie/series name */}
+          {/* Telegram Bot link — uses cinemm.com's format: t.me/cinemmbot?start=w_m_<id> */}
           {tgBotUrl && (
             <a
-              href={`${tgBotUrl}?start=${encodeURIComponent(item.name)}`}
+              href={`${tgBotUrl}?start=w_${item.type === 'movie' ? 'm' : 's'}_${item.id}`}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium mt-2"
