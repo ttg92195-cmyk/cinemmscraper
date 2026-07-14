@@ -135,3 +135,44 @@ Stage Summary:
 - ဒါပေမဲ့ **cinemm.com က ယခု post တွေ ပိတ်ထားလို့** search results 0 ပဲ ရတယ်။ getDetails ကလည်း empty ပြန်တယ်။ ScraperAPI ကလည်း SPA shell ပဲရတယ် (RSC junk စစ်ထုတ်ပြီး empty ဖြစ်သွားတယ်)။
 - ဒါကြောင့် အခု response မှာ method="fallback" ပဲ ဖြစ်မယ်။ overview ဗလာပဲ ဖြစ်မယ်။ poster-resolve ကလည်း 0 results ကြောင့် fail ဖြစ်မယ်။
 - **cinemm.com ပြန်ဖွင့်ပြီးရင်** အရာအားလုံး အလုပ်လုပ်မယ်။
+
+---
+Task ID: action-id-update
+Agent: main (Super Z)
+Task: cinemm.com ပြန်ဖွင့်ပြီးတဲ့နောက် ဘာတွေ ပြောင်းလဲထားလဲ စစ်ဆေး + code ပြင်ဆင်
+
+Work Log:
+- cinemm.com ပြန်ဖွင့်ပြီးတဲ့အတွက် direct HTTP probes တွေ စမ်းကြည့်တယ်:
+  1. Search page HTML fetch — SPA shell ပဲ ရတယ် (19KB)
+  2. searchAction (608f37e0...) POST — အလုပ်လုပ်တယ်! Inception ရလဒ်ပါပြန်တယ် (poster URL ပါ)
+  3. getMovieDetailsAction (60663b32...) POST — overview="$undefined" ပြန်တယ် (သူတို့ တမင် ဖယ်ထားတယ်)
+  4. getMovieSourcesAction (40fd46d9...) POST — {"ok":true,"access":"telegram","servers":[]}
+  5. getSeriesDetailsAction (40011a39...) POST — overview="$undefined" ပြန်တယ်
+  6. getEpisodeSourcesAction (60bebae0...) POST — error digest ပြန်တယ် (movie ID ပေးလို့)
+  7. /api/movie/6611, /api/search?q=Inception — 404 ပြန်တယ်
+
+- JS bundle ထဲက createServerReference calls တွေကို ခွဲခြမ်းစစ်ဆေးတယ်:
+  - 40fd46d989efde0198496371446e1d00b777f8021f → getMovieSourcesAction (NEW! အသစ်)
+  - 60bebae00379fff9c39e9dccf659b024a89da4b5b4 → getEpisodeSourcesAction
+  - 608f37e00992dd40df0badde8f2f45e5db62a48046 → searchAction
+  - 60663b32ebac1369c06f990ebeed80f0ec3101d061 → getMovieDetailsAction
+  - 40011a39f4c37fb76852c6cc01a17bd20e98784283 → getSeriesDetailsAction
+
+- တွေ့ရတဲ့ အဓိက bug: ကျွန်တော်တို့ code ထဲမှာ getMovieSources အတွက် getEpisodeSourcesAction ID ကို မှားသုံးနေတယ်။
+
+Changes made:
+1. **src/lib/cinemm.ts** — ACTIONS object ပြင်လိုက်တယ်:
+   - အသစ် `getMovieSources: '40fd46d989efde0198496371446e1d00b777f8021f'` ထည့်တယ်
+   - အားလုံး function name နဲ့ မှတ်သားထားတယ်
+   - `getMovieDetails()` function ထဲက `ACTIONS.getEpisodeServers` ကို `ACTIONS.getMovieSources` လို့ ပြင်လိုက်တယ်
+   - source response ထဲက `access` field ကိုလည်း ဖတ်တယ်
+
+Commit: 9bd0496 "Update Server Action IDs: add getMovieSourcesAction"
+Push: 7dbfeac..9bd0496 main -> main (pushed successfully)
+
+Stage Summary:
+- Action ID မှားယွင်းမှု ပြင်ပြီးပြီ။ အခု getMovieSourcesAction ကို မှန်မှန်ကန်ကန် ခေါ်တယ်။
+- ဒါပေမဲ့ servers တွေ ဗလာပဲ (access="telegram") — cinemm.com က servers တွေကို Telegram bot ထဲမှာ ထားတယ်။
+- Overview ပြဿနာ ဆက်ရှိနေတယ် — getMovieDetailsAction က overview="$undefined" ပြန်တယ်။
+- Overview ကို browser rendering မှသာ ရနိုင်တယ်။ Railway မှာ Playwright မရလို့ အခက်အခဲရှိတယ်။
+- နောက်ဆုံး strategy: browserless service (premium proxy, residential IPs) စဉ်းစားရမယ်။
