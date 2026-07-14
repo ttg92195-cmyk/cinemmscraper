@@ -1,10 +1,6 @@
-# Railway config — tells Railway how to build and run
-[build]
-# Railway uses the Dockerfile automatically
-
+# Railway config
 [deploy]
-# Health check
 healthcheckPath = "/"
-healthcheckTimeout = 30
+healthcheckTimeout = 60
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3

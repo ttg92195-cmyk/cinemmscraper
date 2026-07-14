@@ -49,11 +49,12 @@ RUN bun run build
 
 # Set environment variables
 ENV NODE_ENV=production
-ENV PORT=$PORT
-ENV HOST=0.0.0.0
+ENV HOSTNAME=0.0.0.0
+ENV PORT=3000
 
-# Expose port (Railway sets $PORT automatically)
+# Expose port
 EXPOSE 3000
 
-# Start the app — Railway sets $PORT env var
-CMD ["sh", "-c", "NODE_ENV=production bun .next/standalone/server.js"]
+# Start the app — Railway sets $PORT env var automatically
+# HOSTNAME=0.0.0.0 binds to all interfaces (required by Railway healthcheck)
+CMD ["sh", "-c", "NODE_ENV=production HOSTNAME=0.0.0.0 PORT=${PORT:-3000} bun .next/standalone/server.js"]
