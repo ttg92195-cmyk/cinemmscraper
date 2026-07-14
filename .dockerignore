@@ -1,0 +1,9 @@
+node_modules
+.next
+.git
+db
+dev.log
+server.log
+*.md
+upload
+download
