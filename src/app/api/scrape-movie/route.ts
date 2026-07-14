@@ -1,21 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server'
+import * as cheerio from 'cheerio'
 
 export const runtime = 'nodejs'
-export const maxDuration = 30
+export const maxDuration = 25
 
 /**
  * GET /api/scrape-movie?id=<num>&type=<movie|series>&source=<CM>&name=<...>
  *
- * Uses Playwright (headless browser) to render cinemm.com's page and extract:
+ * Uses ScraperAPI (with JavaScript rendering) to fetch cinemm.com's fully
+ * rendered HTML, then extracts:
  *   - Overview text (Myanmar subtitle description)
  *   - Telegram bot link (https://t.me/cinemmbot?start=w_m_<id>)
  *
- * This bypasses cinemm.com's API restrictions by rendering the page exactly
- * as a real browser would, capturing the client-side rendered content.
- *
- * Note: On Vercel, Playwright browsers may not be available. In that case,
- * we fall back to a simple HTTP fetch + regex extraction from the RSC data
- * embedded in the HTML (self.__next_f.push chunks).
+ * ScraperAPI handles the browser rendering server-side — no Playwright
+ * or browser binaries needed. Works perfectly on Vercel.
  */
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url)
@@ -30,124 +28,126 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'Missing "id"' }, { status: 400 })
   }
 
-  // Strategy 1: Try Playwright (works locally, may not work on Vercel)
-  let browser = null
-  try {
-    const { chromium } = await import('playwright-core')
-    // Try to find a browser executable
-    const browserPath = process.env.PLAYWRIGHT_BROWSERS_PATH
-      || '/home/z/.cache/ms-playwright'
-    browser = await chromium.launch({
-      headless: true,
-      executablePath: browserPath ? undefined : undefined, // let it auto-detect
-    })
-    const page = await browser.newPage()
-    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' })
-
-    const searchUrl = `https://cinemm.com/?search=${encodeURIComponent(name || id)}&type=${type}`
-    await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 15000 })
-    await page.waitForTimeout(2000)
-
-    const resultEl = page.locator(`text=${name}`).first()
-    if (await resultEl.count() > 0) {
-      await resultEl.click()
-      await page.waitForTimeout(5000)
-    }
-
-    const pageText = await page.evaluate(() => document.body.innerText)
-    let overview = ''
-    const movieMatch = pageText.match(/(?:Movie|Series)\s*\n([\s\S]*?)(?=(?:Watch on Telegram|Show Sources|Back|$))/)
-    if (movieMatch) overview = movieMatch[1].trim()
-    if (!overview) {
-      const fallbackMatch = pageText.match(/(?:Movie|Series)\s*\n([\s\S]*?)$/)
-      if (fallbackMatch) overview = fallbackMatch[1].trim()
-    }
-
-    const telegramLink = await page.locator('a[href*="t.me"]').first().getAttribute('href').catch(() => null)
-    const html = await page.content()
-    const streamUrls = html.match(/https:\/\/stream\.(cmreel|bioscopeapp)\.com\/file\/[^\s"'<>]+/g) || []
-
-    await browser.close()
-    browser = null
-
+  const apiKey = process.env.SCRAPER_API_KEY
+  if (!apiKey) {
+    // No API key — construct Telegram link from ID and return minimal data
     return NextResponse.json({
-      id: parseInt(id, 10), name, year, poster, type, source,
-      overview, telegramLink,
-      streamUrls: [...new Set(streamUrls)],
+      id: parseInt(id, 10),
+      name, year, poster, type, source,
+      overview: '',
+      telegramLink: `https://t.me/cinemmbot?start=w_${type === 'movie' ? 'm' : 's'}_${id}`,
+      streamUrls: [],
       fetchedAt: new Date().toISOString(),
       sourceUrl: `https://cinemm.com/?search=${encodeURIComponent(name)}&type=${type}`,
-      error: null,
-      method: 'playwright',
+      error: 'NO_SCRAPER_API_KEY',
+      method: 'no-key',
     })
-  } catch (playwrightError) {
-    console.log('Playwright not available, using HTTP fallback:', playwrightError instanceof Error ? playwrightError.message : 'unknown')
-    if (browser) await browser.close().catch(() => {})
   }
 
-  // Strategy 2: HTTP fallback — fetch the page HTML and extract data from
-  // the RSC chunks (self.__next_f.push). This works without a browser.
   try {
-    const searchUrl = `https://cinemm.com/?search=${encodeURIComponent(name)}&type=${type}`
-    const res = await fetch(searchUrl, {
+    // Build the cinemm.com URL for this movie/series
+    const movieUrl = `https://cinemm.com/?search=${encodeURIComponent(name)}&type=${type}`
+
+    // Call ScraperAPI with JavaScript rendering enabled
+    const scraperUrl = `http://api.scraperapi.com?api_key=${apiKey}&url=${encodeURIComponent(movieUrl)}&render=true&country_code=us`
+
+    const scrapeRes = await fetch(scraperUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html',
-        'Accept-Language': 'en-US,en;q=0.9',
       },
     })
-    const html = await res.text()
 
-    // Extract RSC data from self.__next_f.push chunks
-    const pushMatches = html.matchAll(/self\.__next_f\.push\(\[1,"((?:[^"\\]|\\.)*)"\]\)/g)
-    let fullData = ''
-    for (const match of pushMatches) {
-      let chunk = match[1]
-        .replace(/\\n/g, '\n')
-        .replace(/\\"/g, '"')
-        .replace(/\\\\/g, '\\')
-        .replace(/\\u0026/g, '&')
-      fullData += chunk
+    if (!scrapeRes.ok) {
+      throw new Error(`ScraperAPI returned HTTP ${scrapeRes.status}`)
     }
 
-    // Look for overview text in the RSC data
-    // The overview is usually a long text chunk (line "2:" or similar)
+    const html = await scrapeRes.text()
+
+    // Extract overview from the rendered HTML using Cheerio
+    const $ = cheerio.load(html)
+
     let overview = ''
-    // Try to find Myanmar text (common in cinemm.com overviews)
-    const myanmarMatch = fullData.match(/T[0-9a-f]+,([\s\S]{100,}?)(?=["\n]|1:\{)/)
-    if (myanmarMatch) {
-      overview = myanmarMatch[1].trim()
+
+    // Strategy 1: Look for the main content area that contains the overview.
+    // cinemm.com renders detail page with the overview as a long text block.
+    // We look for the largest text block containing Myanmar characters.
+    const allText: string[] = []
+    $('body *').each((_i, el) => {
+      const text = $(el).clone().children().remove().end().text().trim()
+      if (text.length > 100 && /[\u1000-\u109F]/.test(text)) {
+        allText.push(text)
+      }
+    })
+
+    if (allText.length > 0) {
+      // Pick the longest text block with Myanmar characters
+      overview = allText.sort((a, b) => b.length - a.length)[0]
     }
 
-    // Look for Telegram link — construct it from the movie ID
-    // cinemm.com's format: https://t.me/cinemmbot?start=w_m_<movieId>
-    // For series: w_s_<seriesId>, for episodes: w_e_<episodeId>
-    const telegramLink = `https://t.me/cinemmbot?start=w_${type === 'movie' ? 'm' : 's'}_${id}`
+    // Strategy 2: If Cheerio didn't find it, try regex on the raw HTML
+    if (!overview || overview.length < 50) {
+      // Remove scripts and styles
+      const cleanHtml = html
+        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
 
-    // Look for stream URLs
+      // Look for Myanmar text blocks
+      const myanmarBlocks = cleanHtml.match(/[\u1000-\u109F][\s\S]{50,}?[\u1000-\u109F]/g) || []
+      if (myanmarBlocks.length > 0) {
+        let longest = ''
+        for (const block of myanmarBlocks) {
+          const clean = block.replace(/<[^>]+>/g, '').trim()
+          if (clean.length > longest.length) longest = clean
+        }
+        overview = longest
+      }
+    }
+
+    // Strategy 3: Extract from body text between "Movie"/"Series" and "Telegram"
+    if (!overview || overview.length < 50) {
+      const plainText = $('body').text()
+      const overviewMatch = plainText.match(/(?:Movie|Series)\s*\n([\s\S]*?)(?=Watch on Telegram|Show Sources|Back|$)/i)
+      if (overviewMatch) {
+        overview = overviewMatch[1].trim()
+      }
+    }
+
+    // Extract Telegram link
+    // Look for t.me/cinemmbot links in the HTML
+    const telegramMatch = html.match(/https:\/\/t\.me\/cinemmbot\?start=w_[a-z]_\d+/)
+    const telegramLink = telegramMatch
+      ? telegramMatch[0]
+      : `https://t.me/cinemmbot?start=w_${type === 'movie' ? 'm' : 's'}_${id}`
+
+    // Extract stream URLs (if any are rendered)
     const streamUrls = html.match(/https:\/\/stream\.(cmreel|bioscopeapp)\.com\/file\/[^\s"'<>]+/g) || []
+    const cmdriveUrls = html.match(/https:\/\/[a-z0-9]+\.cmdrive\.xyz\/[^\s"'<>]+/g) || []
+    const allStreamUrls = [...new Set([...streamUrls, ...cmdriveUrls])]
 
     return NextResponse.json({
-      id: parseInt(id, 10), name, year, poster, type, source,
+      id: parseInt(id, 10),
+      name, year, poster, type, source,
       overview,
       telegramLink,
-      streamUrls: [...new Set(streamUrls)],
+      streamUrls: allStreamUrls,
       fetchedAt: new Date().toISOString(),
-      sourceUrl: `https://cinemm.com/?search=${encodeURIComponent(name)}&type=${type}`,
+      sourceUrl: movieUrl,
       error: null,
-      method: 'http-fallback',
+      method: 'scraperapi',
     })
   } catch (e) {
     console.error('[/api/scrape-movie] error:', e)
-    return NextResponse.json(
-      {
-        id: parseInt(id, 10), name, year, poster, type, source,
-        overview: '', telegramLink: null, streamUrls: [],
-        error: e instanceof Error ? e.message : 'Scrape failed',
-        fetchedAt: new Date().toISOString(),
-        sourceUrl: `https://cinemm.com/?search=${encodeURIComponent(name)}&type=${type}`,
-        method: 'error',
-      },
-      { status: 200 },
-    )
+    // Fallback: construct Telegram link from ID
+    return NextResponse.json({
+      id: parseInt(id, 10),
+      name, year, poster, type, source,
+      overview: '',
+      telegramLink: `https://t.me/cinemmbot?start=w_${type === 'movie' ? 'm' : 's'}_${id}`,
+      streamUrls: [],
+      fetchedAt: new Date().toISOString(),
+      sourceUrl: `https://cinemm.com/?search=${encodeURIComponent(name)}&type=${type}`,
+      error: e instanceof Error ? e.message : 'Scrape failed',
+      method: 'error',
+    })
   }
 }
