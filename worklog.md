@@ -60,3 +60,41 @@ Stage Summary:
 - Poster URL ကိုလည်း auto-resolve လုပ်ပေးတယ်။ user က poster param မပါဘဲ test လုပ်ရင်တောင် ပြန်ရတယ်။
 - GitHub push မလုပ်နိုင်ဘူး — credentials မရနိုင်လို့။ User က local ကနေပဲ push လုပ်ရမယ်။
 - Railway ပေါ်မှာ deploy ဖြစ်ပြီးရင် ပြန်စမ်းကြည့်ရမယ်။
+
+---
+Task ID: add-getDetails-strategy
+Agent: main (Super Z)
+Task: /api/scrape-movie route မှာ getDetails() ကို primary strategy အဖြစ် ထည့်ပေး + circular dependency ဖြေရှင်း + ScraperAPI timeout တိုး
+
+Work Log:
+- ဖတ်ခဲ့တဲ့ file တွေ: src/lib/cinemm.ts (getMovieDetails, getSeriesDetails, getDetails, callAction, parseMovieDetailsResponse, CinemmServer interface, CinemmMovieDetails/SeriesDetails interfaces)
+- တွေ့ရတဲ့ circular dependency: getMovieDetails() (line 666-684) က overview မရရင် /api/scrape-movie ကို fetch လုပ်တယ်။ ဒါပေမဲ့ /api/scrape-movie route ကလည်း getDetails() ကို ခေါ်ရင် infinite loop ဖြစ်မယ်။
+- တွေ့ရတဲ့ ပြဿနာ: ScraperAPI က 20s timeout ထားတယ်။ cinemm.com SPA render လုပ်ဖို့ အချိန်ကြာတယ် → timeout ဖြစ်တယ်။
+
+Changes made:
+1. **src/lib/cinemm.ts** (line 664-684 removed):
+   - getMovieDetails() ထဲက /api/scrape-movie fetch block ကို ဖြုတ်လိုက်တယ်။ comment နဲ့ အကြောင်းပြချက် ထည့်ထားတယ်။
+   - အခု getMovieDetails() က overview ဗလာဖြစ်ရင် အဲဒါအတိုင်း return လုပ်တယ်။ UI က /api/scrape-movie ကို သီးခြား ခေါ်ရမယ်။
+
+2. **src/app/api/scrape-movie/route.ts** (rewritten):
+   - Strategy chain အသစ်:
+     0. poster-resolve (search action)
+     1. getDetails() — cinemm.com Server Action direct HTTP call (NEW - primary)
+     2. Playwright (local dev only)
+     3. ScraperAPI (render=true, timeout 45s)
+     4. fallback
+   - getDetails() က overview သို့မဟုတ် servers ရရင် အောင်မြင်တယ်။
+   - maxDuration ကို 25 ကနေ 60 တိုးတယ် (retries + ScraperAPI အတွက်)။
+   - ScraperAPI timeout ကို 20s ကနေ 45s တိုးတယ်။
+   - visitorUuid query param ကို getDetails() ဆီ ပို့ပေးတယ် (quota bypass အတွက်)။
+   - Response ထဲမှာ servers, streamUrls, remaining ပါပေးတယ်။
+
+Commit: db317dd "Add getDetails as primary strategy in scrape-movie route"
+Push: e1375d7..db317dd main -> main (pushed successfully, token removed after)
+
+Stage Summary:
+- အခု /api/scrape-movie က Railway ပေါ်မှာ getDetails() strategy ကို အရင်ခေါ်မယ်။ ဒါက cinemm.com Server Action ကို plain HTTP POST နဲ့ ခေါ်တာဖြစ်လို့ Railway ပေါ်မှာ အလုပ်လုပ်မယ်။
+- Overview က RSC line "2:" မှာ ပါတယ် (new format)။ parseMovieDetailsResponse က အဲဒါကို extract လုပ်ပေးတယ်။
+- ပြီးရင် Railway ပေါ် ပြန် deploy ဖြစ်တဲ့အခါ ဒီ URL နဲ့ စမ်းကြည့်ရမယ်:
+  https://cinemmscraper-production.up.railway.app/api/scrape-movie?id=6611&type=movie&source=CM&name=Inception&year=2010
+- မျှော်လင့်ရတဲ့ response: method="getDetails", overview မှာ Myanmar text ပါမယ်, attempts ထဲမှာ getDetails ok=true ပါမယ်။
