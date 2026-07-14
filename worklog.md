@@ -176,3 +176,46 @@ Stage Summary:
 - Overview ပြဿနာ ဆက်ရှိနေတယ် — getMovieDetailsAction က overview="$undefined" ပြန်တယ်။
 - Overview ကို browser rendering မှသာ ရနိုင်တယ်။ Railway မှာ Playwright မရလို့ အခက်အခဲရှိတယ်။
 - နောက်ဆုံး strategy: browserless service (premium proxy, residential IPs) စဉ်းစားရမယ်။
+
+---
+Task ID: BREAKTHROUGH-boolean-arg
+Agent: main (Super Z)
+Task: cinemm.com client-side rendering ကို reverse-engineer လုပ်ပြီး overview ရယူ
+
+Work Log:
+- JS bundle ၇ ခုလုံး download လုပ်ပြီး action ID တွေကို extract လုပ်တယ်။ Action ID ၅ ခုပဲ ရှိတယ် (အရင် သိထားပြီးသား)။
+- ဒါပေမဲ့ **client code ထဲမှာ overview fetch လုပ်ပုံ** ကို တွေ့ရတယ်:
+  ```js
+  let s = "movie" === e.type && !(null == (t = e.overview) ? void 0 : t.trim());
+  // s = true if movie type AND overview is empty
+  let t = await k(e.id, s);  // k = getMovieDetailsAction
+  // response ထဲက overview ကို state ထဲ ထည့်တယ်
+  t.overview && B({...e, overview: t.overview})
+  ```
+- ဒါက `getMovieDetailsAction(id, fetchOverview: boolean)` ပုံစံ ဖြစ်ကြောင်း ညွှန်ပြနေတယ်!
+- Test လုပ်ကြည့်တယ်:
+  - `[6611, true]` → overview text **ရတယ်!** (Myanmar text ပါပြန်တယ်!)
+  - `[6611, false]` → overview="$undefined"
+  - `[6611, "CM"]` → overview="$undefined" (ကျွန်တော်တို့ အရင်က ဒါပဲ ပေးနေတယ်!)
+  - `[6611]` → overview ရတယ် (default true လားဆိုတာ မသေချာဘူး၊ ဒါပေမဲ့ ရတယ်)
+- ဒီ pattern က series အတွက်လည်း အတူတူပါ:
+  - `[1398, true]` → overview ရတယ်!
+
+Changes made:
+1. **src/lib/cinemm.ts** `getMovieDetails()`:
+   - `callAction(ACTIONS.getMovieServers, [id, source])` → `[id, true]`
+   - Comment ထဲမှာ အသစ်ရှာတွေ့တဲ့ pattern ကို မှတ်သားထားတယ်
+
+2. **src/lib/cinemm.ts** `getSeriesDetails()`:
+   - `callAction(ACTIONS.getSeriesDetails, [id, source])` → `[id, true]`
+
+Commit: 11d8daf "BREAKTHROUGH: getMovieDetailsAction takes boolean arg, not source string"
+Push: 9bd0496..11d8daf main -> main (pushed successfully)
+
+Stage Summary:
+- **အဓိက အောင်မြင်မှု:** cinemm.com က overview ကို Server Action ကနေ တမင် မဖယ်ထားဘူး။ ဒါက argument မှားယွင်းတဲ့အတွက်ကြောင့်သာ fail ဖြစ်တာ။
+- **Browser rendering မလိုတော့ဘူး!** ScraperAPI, Playwright တွေ မလိုတော့ဘူး။
+- **Direct HTTP call နဲ့ပဲ overview ရတယ်!** Railway ပေါ်မှာလည်း အလုပ်လုပ်မယ်။
+- နောက်ဆုံး စမ်းသပ်ဖို့: Railway deploy ပြီးရင်
+  https://cinemmscraper-production.up.railway.app/api/scrape-movie?id=6611&type=movie&source=CM&name=Inception&year=2010
+  response မှာ `method: "getDetails"` နဲ့ `overview` မှာ Myanmar text ပါမယ်။
