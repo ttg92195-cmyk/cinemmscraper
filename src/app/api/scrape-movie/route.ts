@@ -6,6 +6,7 @@ import {
   type MediaType,
   type CinemmDetails,
 } from '@/lib/cinemm'
+import { fetchStreamUrlsFromBot } from '@/lib/telegram-cinemm'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -107,6 +108,32 @@ export async function GET(req: NextRequest) {
     })
 
     if (hasContent) {
+      // Found overview! Now check if we should also fetch stream URLs from Telegram bot.
+      // cinemm.com returns access="telegram" with empty servers — the actual stream
+      // URLs live inside the @cinemmbot Telegram bot.
+      let telegramStreamUrls: string[] = []
+      const telegramCached = false
+      if (servers.length === 0) {
+        // No servers from cinemm.com — try the Telegram bot
+        try {
+          const tgResult = await fetchStreamUrlsFromBot(
+            type === 'movie' ? `w_m_${id}` : `w_s_${id}`,
+          )
+          telegramStreamUrls = tgResult.urls
+          attempts.push({
+            method: 'telegram-bot',
+            ok: telegramStreamUrls.length > 0,
+            error: tgResult.error,
+          })
+        } catch (e) {
+          attempts.push({
+            method: 'telegram-bot',
+            ok: false,
+            error: e instanceof Error ? e.message : 'Telegram bot fetch failed',
+          })
+        }
+      }
+
       // Found it! Return immediately.
       return NextResponse.json({
         id: parseInt(id, 10),
@@ -117,8 +144,12 @@ export async function GET(req: NextRequest) {
         source,
         overview,
         telegramLink,
-        streamUrls: servers.map((s) => s.url).filter(Boolean),
+        streamUrls: telegramStreamUrls.length > 0
+          ? telegramStreamUrls
+          : servers.map((s) => s.url).filter(Boolean),
         servers,
+        telegramStreamUrls,
+        telegramCached,
         fetchedAt: new Date().toISOString(),
         sourceUrl: searchUrl,
         error: null,

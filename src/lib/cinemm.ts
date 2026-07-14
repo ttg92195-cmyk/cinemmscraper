@@ -316,25 +316,15 @@ let lastMintAt = 0
 let inflightMint: Promise<VisitorInfo | null> | null = null
 
 async function mintFreshUuid(): Promise<VisitorInfo | null> {
-  // Generate a random fingerprint-like ID (the site accepts any string)
-  const fp = Array.from({ length: 20 }, () =>
-    Math.floor(Math.random() * 16).toString(16),
-  ).join('')
-  try {
-    const { lines } = await callAction(ACTIONS.identifyUser, [fp, undefined])
-    const raw = lines.get('1')
-    if (!raw) return null
-    const info = JSON.parse(raw) as VisitorInfo
-    // Detect rate-limited / stale UUID: if remaining is 0 on a fresh mint,
-    // the IP is rate-limited and cinemm.com returned an exhausted UUID.
-    if (info.remaining <= 0) {
-      return null
-    }
-    return info
-  } catch (e) {
-    console.error('mintFreshUuid failed:', e)
-    return null
-  }
+  // cinemm.com removed the UUID/quota system entirely (2026-07-10+).
+  // The identifyUserAction ID no longer exists in the ACTIONS object, and
+  // the Server Action itself returns an error. The whole UUID pool / quota
+  // refresh path is now dead code, kept here only to avoid breaking the
+  // visitorUuid parameter signature in getMovieDetails/getSeriesDetails.
+  //
+  // If cinemm.com ever brings back UUIDs, restore the callAction line below
+  // and add the new identifyUser action ID to the ACTIONS object.
+  return null
 }
 
 /**
