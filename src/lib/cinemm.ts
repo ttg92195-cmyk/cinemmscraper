@@ -20,12 +20,19 @@ import { getCache, setCache } from '@/lib/cache'
 
 const CINEMM_ORIGIN = 'https://cinemm.com'
 
-// Server Action IDs (extracted from cinemm.com's bundled JS — updated 2026-07-10
-// after cinemm.com removed the UUID/quota system and changed all action IDs).
+// Server Action IDs (extracted from cinemm.com's bundled JS — updated 2026-07-14
+// after cinemm.com added a new getMovieSourcesAction and changed how sources work).
+// Mapping verified from page-699f9fbb79a09821.js:
+//   createServerReference("40fd46d989efde0198496371446e1d00b777f8021f", ..., "getMovieSourcesAction")
+//   createServerReference("60bebae00379fff9c39e9dccf659b024a89da4b5b4", ..., "getEpisodeSourcesAction")
+//   createServerReference("608f37e00992dd40df0badde8f2f45e5db62a48046", ..., "searchAction")
+//   createServerReference("60663b32ebac1369c06f990ebeed80f0ec3101d061", ..., "getMovieDetailsAction")
+//   createServerReference("40011a39f4c37fb76852c6cc01a17bd20e98784283", ..., "getSeriesDetailsAction")
 const ACTIONS = {
-  search:              '608f37e00992dd40df0badde8f2f45e5db62a48046',
-  getMovieServers:     '60663b32ebac1369c06f990ebeed80f0ec3101d061', // getMovieDetailsAction
-  getSeriesDetails:    '40011a39f4c37fb76852c6cc01a17bd20e98784283',
+  search:              '608f37e00992dd40df0badde8f2f45e5db62a48046', // searchAction
+  getMovieServers:     '60663b32ebac1369c06f990ebeed80f0ec3101d061', // getMovieDetailsAction (overview)
+  getMovieSources:     '40fd46d989efde0198496371446e1d00b777f8021f', // getMovieSourcesAction (NEW)
+  getSeriesDetails:    '40011a39f4c37fb76852c6cc01a17bd20e98784283', // getSeriesDetailsAction
   getEpisodeServers:   '60bebae00379fff9c39e9dccf659b024a89da4b5b4', // getEpisodeSourcesAction
 } as const
 
@@ -643,13 +650,17 @@ export async function getMovieDetails(
       continue
     }
     
-    // Also call getMovieSourcesAction for servers (currently returns empty,
-    // but may return servers in the future)
+    // Also call getMovieSourcesAction for servers — returns { ok, access, servers }
+    // (currently access="telegram" with empty servers — links moved to Telegram bot,
+    // but the action may return real servers in the future)
     try {
-      const { lines: sourceLines } = await callAction(ACTIONS.getEpisodeServers, [id, source])
+      const { lines: sourceLines } = await callAction(ACTIONS.getMovieSources, [id, source])
       const sourceRaw = sourceLines.get('1')
       if (sourceRaw) {
-        const sourceParsed = JSON.parse(sourceRaw) as { servers?: CinemmServer[] }
+        const sourceParsed = JSON.parse(sourceRaw) as {
+          servers?: CinemmServer[]
+          access?: string
+        }
         if (sourceParsed.servers && sourceParsed.servers.length > 0) {
           result.servers = sourceParsed.servers.map((s) => ({
             ...s,
