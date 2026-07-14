@@ -258,6 +258,7 @@ export async function searchCinemmBrowser(
         tmdbId: it.tmdbId === '$undefined' ? null : it.tmdbId,
         imdbId: it.imdbId === '$undefined' ? null : it.imdbId,
         overview: it.overview === '$undefined' ? null : it.overview,
+        poster: it.poster === '$undefined' ? '' : (it.poster ?? ''),
       }))
       if (items.length > 0) await setCache(key, items)
       return { items, cached: false }

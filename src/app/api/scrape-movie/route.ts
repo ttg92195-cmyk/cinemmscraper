@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import * as cheerio from 'cheerio'
+import { searchCinemm, type MediaType } from '@/lib/cinemm'
 
 export const runtime = 'nodejs'
 export const maxDuration = 25
@@ -7,11 +8,18 @@ export const maxDuration = 25
 /**
  * GET /api/scrape-movie?id=<num>&type=<movie|series>&source=<CM>&name=<...>
  *
- * Uses Playwright (headless browser) to render cinemm.com's detail page
- * and extract the overview text + Telegram link.
+ * Scrapes cinemm.com to get movie/series overview + Telegram link.
  *
- * On Railway: Playwright + Chromium are installed via Dockerfile.
- * On Vercel: Falls back to ScraperAPI (render=true) or Telegram link construction.
+ * Strategy chain (each step falls through to the next on failure):
+ *   0. Resolve poster — if `poster` query param is missing, search cinemm.com
+ *      and look up the matching item by id to grab its poster URL.
+ *   1. Playwright (local dev / full Docker image) — renders SPA, clicks result, reads detail page
+ *   2. ScraperAPI (render=true) — server-side render via ScraperAPI service
+ *   3. Fallback — just construct Telegram link from ID
+ *
+ * IMPORTANT: On Railway/Vercel standalone builds, Playwright's browsers.json
+ * is missing from the standalone bundle, so import('playwright') will throw.
+ * That's expected — we catch it and fall through to ScraperAPI.
  */
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url)
@@ -19,86 +27,96 @@ export async function GET(req: NextRequest) {
   const type = searchParams.get('type') ?? 'movie'
   const name = searchParams.get('name') ?? ''
   const year = searchParams.get('year') ?? ''
-  const poster = searchParams.get('poster') ?? ''
+  let poster = searchParams.get('poster') ?? ''
   const source = searchParams.get('source') ?? 'CM'
 
   if (!id) {
     return NextResponse.json({ error: 'Missing "id"' }, { status: 400 })
   }
 
-  // Telegram link — always construct from ID (cinemm.com format)
+  const searchUrl = `https://cinemm.com/?search=${encodeURIComponent(name)}&type=${type}`
   const telegramLink = `https://t.me/cinemmbot?start=w_${type === 'movie' ? 'm' : 's'}_${id}`
 
-  // Strategy 1: Try Playwright (works on Railway with Docker, local dev)
-  let browser = null
+  // Track all attempts for the final response
+  const attempts: Array<{ method: string; ok: boolean; error?: string; overview?: string }> = []
+
+  // ============================================================
+  // Step 0: Resolve poster URL if not supplied
+  // ============================================================
+  // The poster is part of the search-result payload (not the detail payload),
+  // so callers normally pass it through. If missing, look it up ourselves.
+  if (!poster && name) {
+    try {
+      const { items } = await searchCinemm(name, type as MediaType, { useCache: true })
+      const match = items.find(
+        (it) => String(it.id) === String(id) || (it.name && it.name.toLowerCase() === name.toLowerCase()),
+      )
+      if (match?.poster) {
+        poster = match.poster
+        attempts.push({ method: 'poster-resolve', ok: true })
+      } else {
+        attempts.push({
+          method: 'poster-resolve',
+          ok: false,
+          error: `No matching item for id=${id} name=${name} in ${items.length} results`,
+        })
+      }
+    } catch (e) {
+      attempts.push({
+        method: 'poster-resolve',
+        ok: false,
+        error: e instanceof Error ? e.message : 'searchCinemm failed',
+      })
+    }
+  }
+  // ============================================================
+  // Strategy 1: Playwright (local dev / full Docker image only)
+  // ============================================================
+  let browser: any = null
   try {
+    // Dynamic import — will throw on Railway standalone build (browsers.json missing)
     const pw = await import('playwright')
+
     browser = await pw.chromium.launch({
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
     })
     const page = await browser.newPage()
-
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' })
 
-    // Navigate to cinemm.com search page
-    const searchUrl = `https://cinemm.com/?search=${encodeURIComponent(name)}&type=${type}`
     await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 20000 })
     await page.waitForTimeout(3000)
 
-    // Click on the movie/series result matching our name
-    // Use a more robust selector — look for clickable elements containing the name
+    // Click the first matching result
     const resultEl = page.locator(`text=${name}`).first()
     const resultCount = await resultEl.count()
-    console.log('Found results for', name, ':', resultCount)
-
     if (resultCount > 0) {
       await resultEl.click()
       await page.waitForTimeout(5000)
     }
 
-    // Extract ALL text content from the page
     const pageText = await page.evaluate(() => document.body.innerText)
-    console.log('Page text length:', pageText.length)
-    console.log('Page text first 300:', pageText.substring(0, 300))
+    const overview = extractOverviewFromText(pageText)
 
-    // Extract overview — look for Myanmar text (the overview always contains Myanmar chars)
-    let overview = ''
-
-    // Strategy A: Text between "Movie"/"Series" and "Watch on Telegram"
-    const movieMatch = pageText.match(/(?:Movie|Series)\s*\n([\s\S]*?)(?=Watch on Telegram|Show Sources|Back|$)/i)
-    if (movieMatch && movieMatch[1].trim().length > 50) {
-      overview = movieMatch[1].trim()
-    }
-
-    // Strategy B: Find the longest Myanmar text block
-    if (!overview || overview.length < 50) {
-      const myanmarBlocks = pageText.match(/[\u1000-\u109F][\s\S]{50,}?[\u1000-\u109F]/g) || []
-      if (myanmarBlocks.length > 0) {
-        overview = myanmarBlocks.sort((a, b) => b.length - a.length)[0].trim()
-      }
-    }
-
-    // Strategy C: Get full body text if it contains Myanmar chars
-    if (!overview || overview.length < 50) {
-      if (/[\u1000-\u109F]/.test(pageText) && pageText.length > 200) {
-        // Take everything after the first line (which is usually "CineMM")
-        const lines = pageText.split('\n').filter(l => l.trim().length > 0)
-        if (lines.length > 2) {
-          overview = lines.slice(2).join('\n').trim()
-        }
-      }
-    }
-
-    // Look for actual Telegram link in the rendered page
-    const actualTelegramLink = await page.locator('a[href*="t.me"]').first().getAttribute('href').catch(() => null)
+    // Look for an actual Telegram link in the rendered page
+    const actualTelegramLink = await page
+      .locator('a[href*="t.me"]')
+      .first()
+      .getAttribute('href')
+      .catch(() => null)
 
     await browser.close()
     browser = null
 
+    attempts.push({ method: 'playwright', ok: true, overview })
+
     return NextResponse.json({
       id: parseInt(id, 10),
-      name, year, poster, type, source,
+      name,
+      year,
+      poster,
+      type,
+      source,
       overview,
       telegramLink: actualTelegramLink || telegramLink,
       streamUrls: [],
@@ -106,82 +124,160 @@ export async function GET(req: NextRequest) {
       sourceUrl: searchUrl,
       error: null,
       method: 'playwright',
-      debug: {
-        resultCount,
-        pageTextLength: pageText.length,
-        pageTextPreview: pageText.substring(0, 200),
-        overviewLength: overview.length,
-      },
+      attempts,
     })
   } catch (playwrightError) {
-    console.error('Playwright failed:', playwrightError instanceof Error ? playwrightError.message : 'unknown')
+    const msg = playwrightError instanceof Error ? playwrightError.message : 'Playwright failed'
+    console.error('[scrape-movie] Playwright failed:', msg)
     if (browser) await browser.close().catch(() => {})
-    // Include error in response for debugging
-    return NextResponse.json({
-      id: parseInt(id, 10),
-      name, year, poster, type, source,
-      overview: '',
-      telegramLink,
-      streamUrls: [],
-      fetchedAt: new Date().toISOString(),
-      sourceUrl: `https://cinemm.com/?search=${encodeURIComponent(name)}&type=${type}`,
-      error: playwrightError instanceof Error ? playwrightError.message : 'Playwright failed',
-      method: 'playwright-error',
-    })
+    attempts.push({ method: 'playwright', ok: false, error: msg })
+    // DO NOT return — fall through to ScraperAPI
   }
 
-  // Strategy 2: ScraperAPI fallback (works on Vercel)
+  // ============================================================
+  // Strategy 2: ScraperAPI (render=true) — works on Railway/Vercel
+  // ============================================================
   const apiKey = process.env.SCRAPER_API_KEY
   if (apiKey) {
     try {
-      const movieUrl = `https://cinemm.com/?search=${encodeURIComponent(name)}&type=${type}`
-      const scraperUrl = `http://api.scraperapi.com?api_key=${apiKey}&url=${encodeURIComponent(movieUrl)}&render=true&country_code=us`
+      const scraperUrl = `http://api.scraperapi.com?api_key=${apiKey}&url=${encodeURIComponent(searchUrl)}&render=true&country_code=us`
+      const scrapeRes = await fetch(scraperUrl, {
+        headers: { 'Accept': 'text/html' },
+        signal: AbortSignal.timeout(20000),
+      })
 
-      const scrapeRes = await fetch(scraperUrl, { headers: { 'Accept': 'text/html' } })
       if (scrapeRes.ok) {
         const html = await scrapeRes.text()
-        const $ = cheerio.load(html)
+        const overview = extractOverviewFromHtml(html)
 
-        let overview = ''
-        // Look for Myanmar text blocks
-        const allText: string[] = []
-        $('body *').each((_i, el) => {
-          const text = $(el).clone().children().remove().end().text().trim()
-          if (text.length > 100 && /[\u1000-\u109F]/.test(text)) {
-            allText.push(text)
-          }
-        })
-        if (allText.length > 0) {
-          overview = allText.sort((a, b) => b.length - a.length)[0]
-        }
+        // Try to find a Telegram link in the HTML
+        const $ = cheerio.load(html)
+        const actualTelegramLink = $('a[href*="t.me"]').first().attr('href') || null
+
+        // Try to find a poster image in the search results
+        const extractedPoster =
+          $('img[src*="image.tmdb.org"], img[src*="cinemm"], img[src*="poster"]').first().attr('src') || poster
+
+        attempts.push({ method: 'scraperapi', ok: true, overview })
 
         return NextResponse.json({
           id: parseInt(id, 10),
-          name, year, poster, type, source,
+          name,
+          year,
+          poster: extractedPoster || poster,
+          type,
+          source,
           overview,
-          telegramLink,
+          telegramLink: actualTelegramLink || telegramLink,
           streamUrls: [],
           fetchedAt: new Date().toISOString(),
-          sourceUrl: movieUrl,
+          sourceUrl: searchUrl,
           error: null,
           method: 'scraperapi',
+          attempts,
+          htmlLength: html.length,
+        })
+      } else {
+        attempts.push({
+          method: 'scraperapi',
+          ok: false,
+          error: `HTTP ${scrapeRes.status} ${scrapeRes.statusText}`,
         })
       }
     } catch (e) {
-      console.log('ScraperAPI failed:', e instanceof Error ? e.message : 'unknown')
+      const msg = e instanceof Error ? e.message : 'ScraperAPI failed'
+      console.error('[scrape-movie] ScraperAPI failed:', msg)
+      attempts.push({ method: 'scraperapi', ok: false, error: msg })
     }
+  } else {
+    attempts.push({
+      method: 'scraperapi',
+      ok: false,
+      error: 'SCRAPER_API_KEY env var not set',
+    })
   }
 
-  // Strategy 3: Fallback — just return Telegram link
+  // ============================================================
+  // Strategy 3: Fallback — return just the Telegram link
+  // ============================================================
+  attempts.push({ method: 'fallback', ok: true })
+
+  const lastError = attempts.find((a) => !a.ok)?.error || null
+
   return NextResponse.json({
     id: parseInt(id, 10),
-    name, year, poster, type, source,
+    name,
+    year,
+    poster,
+    type,
+    source,
     overview: '',
     telegramLink,
     streamUrls: [],
     fetchedAt: new Date().toISOString(),
-    sourceUrl: `https://cinemm.com/?search=${encodeURIComponent(name)}&type=${type}`,
-    error: null,
+    sourceUrl: searchUrl,
+    error: lastError,
     method: 'fallback',
+    attempts,
   })
+}
+
+/**
+ * Extract overview text from a plain-text page body.
+ * The overview always contains Myanmar characters (U+1000-U+109F).
+ */
+function extractOverviewFromText(pageText: string): string {
+  if (!pageText) return ''
+
+  // Strategy A: Text between "Movie"/"Series" header and footer keywords
+  const headerMatch = pageText.match(/(?:Movie|Series)\s*\n([\s\S]*?)(?=Watch on Telegram|Show Sources|Back|$)/i)
+  if (headerMatch && headerMatch[1].trim().length > 50) {
+    return headerMatch[1].trim()
+  }
+
+  // Strategy B: Find the longest Myanmar text block
+  const myanmarBlocks = pageText.match(/[\u1000-\u109F][\s\S]{50,}?[\u1000-\u109F]/g) || []
+  if (myanmarBlocks.length > 0) {
+    const longest = myanmarBlocks.sort((a, b) => b.length - a.length)[0]
+    return (longest ?? '').trim()
+  }
+
+  // Strategy C: Get full body text if it contains Myanmar chars
+  if (/[\u1000-\u109F]/.test(pageText) && pageText.length > 200) {
+    const lines = pageText.split('\n').filter((l) => l.trim().length > 0)
+    if (lines.length > 2) {
+      return lines.slice(2).join('\n').trim()
+    }
+  }
+
+  return ''
+}
+
+/**
+ * Extract overview text from HTML.
+ * Looks for the longest Myanmar text block in the rendered HTML.
+ */
+function extractOverviewFromHtml(html: string): string {
+  if (!html) return ''
+
+  try {
+    const $ = cheerio.load(html)
+    const allText: string[] = []
+
+    $('body *').each((_i, el) => {
+      const text = $(el).clone().children().remove().end().text().trim()
+      if (text.length > 100 && /[\u1000-\u109F]/.test(text)) {
+        allText.push(text)
+      }
+    })
+
+    if (allText.length > 0) {
+      const longest = allText.sort((a, b) => b.length - a.length)[0]
+      return longest ?? ''
+    }
+  } catch {
+    // ignore parse errors
+  }
+
+  return ''
 }

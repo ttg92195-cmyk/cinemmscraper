@@ -442,6 +442,7 @@ export async function searchCinemm(
         tmdbId: it.tmdbId === '$undefined' ? null : it.tmdbId,
         imdbId: it.imdbId === '$undefined' ? null : it.imdbId,
         overview: it.overview === '$undefined' ? null : it.overview,
+        poster: it.poster === '$undefined' ? '' : (it.poster ?? ''),
       }))
     } catch {
       items = []
