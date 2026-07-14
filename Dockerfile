@@ -35,8 +35,8 @@ COPY package.json bun.lock* ./
 # Install dependencies
 RUN bun install
 
-# Install Playwright browsers
-RUN npx playwright install chromium --with-deps
+# Install Playwright browsers (full playwright, not playwright-core)
+RUN bun add playwright && npx playwright install chromium --with-deps
 
 # Copy all files
 COPY . .

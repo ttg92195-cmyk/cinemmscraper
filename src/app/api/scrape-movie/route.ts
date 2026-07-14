@@ -29,13 +29,13 @@ export async function GET(req: NextRequest) {
   // Telegram link — always construct from ID (cinemm.com format)
   const telegramLink = `https://t.me/cinemmbot?start=w_${type === 'movie' ? 'm' : 's'}_${id}`
 
-  // Strategy 1: Try Playwright (works on Railway, local dev)
+  // Strategy 1: Try Playwright (works on Railway with Docker, local dev)
   let browser = null
   try {
-    const { chromium } = await import('playwright-core')
+    const { chromium } = await import('playwright')
     browser = await chromium.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu'],
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
     })
     const page = await browser.newPage()
 
@@ -43,7 +43,7 @@ export async function GET(req: NextRequest) {
 
     // Navigate to cinemm.com search page
     const searchUrl = `https://cinemm.com/?search=${encodeURIComponent(name)}&type=${type}`
-    await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 15000 })
+    await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 20000 })
     await page.waitForTimeout(2000)
 
     // Click on the movie/series result matching our name
@@ -101,7 +101,7 @@ export async function GET(req: NextRequest) {
       method: 'playwright',
     })
   } catch (playwrightError) {
-    console.log('Playwright failed:', playwrightError instanceof Error ? playwrightError.message : 'unknown')
+    console.error('Playwright failed:', playwrightError instanceof Error ? playwrightError.message : 'unknown')
     if (browser) await browser.close().catch(() => {})
   }
 
