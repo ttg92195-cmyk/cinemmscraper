@@ -98,3 +98,40 @@ Stage Summary:
 - ပြီးရင် Railway ပေါ် ပြန် deploy ဖြစ်တဲ့အခါ ဒီ URL နဲ့ စမ်းကြည့်ရမယ်:
   https://cinemmscraper-production.up.railway.app/api/scrape-movie?id=6611&type=movie&source=CM&name=Inception&year=2010
 - မျှော်လင့်ရတဲ့ response: method="getDetails", overview မှာ Myanmar text ပါမယ်, attempts ထဲမှာ getDetails ok=true ပါမယ်။
+
+---
+Task ID: filter-rsc-junk
+Agent: main (Super Z)
+Task: ScraperAPI ကနေ ရတဲ့ overview ထဲက RSC junk တွေကို စစ်ထုတ်
+
+Work Log:
+- ပြဿနာ: ScraperAPI က cinemm.com SPA shell ကို render လုပ်ပေးတယ်။ ဒါပေမဲ့ HTML ထဲမှာ `self.__next_f.push([1,"a:{...}"])` RSC chunks တွေပဲ ပါတယ်။ `extractOverviewFromHtml()` က အဲဒါကို overview အဖြစ် ပြန်ပေးတယ်။
+- အသစ်ထည့်တဲ့ `isRscJunk()` function:
+  - `self.__next_f.push` နဲ့ စဖို့ စစ်တယ်
+  - RSC wire format `0:["$","div",...]` စစ်တယ်
+  - RSC T chunk `2:T<hex>,...` စစ်တယ်
+  - short `$` reference စစ်တယ်
+  - JSON char ratio > 15% ဖြစ်ပြီး Myanmar char မပါရင် junk အဖြစ် သတ်မှတ်တယ်
+
+- `extractOverviewFromHtml()` ကို ပြင်လိုက်တယ်:
+  1. **Strategy A**: `self.__next_f.push([1,"..."])` chunks တွေကို regex နဲ့ ဖမ်းတယ်
+  2. JSON.parse() နဲ့ unescape လုပ်တယ်
+  3. အထဲမှာ `\d+:T[0-9a-f]+,(<text>)` pattern နဲ့ T-prefixed text chunks တွေကို ရှာတယ်
+  4. Myanmar char ပါရင် candidate အဖြစ် ထည့်တယ်
+  5. plain Myanmar text block တွေကိုလည်း ရှာတယ်
+  6. **Strategy B**: cheerio နဲ့ body text တွေကို စစ်တယ် (isRscJunk filter သုံးပြီး)
+  7. candidates တွေကို filter လုပ်ပြီး longest ကို return လုပ်တယ်
+
+- ScraperAPI success condition ပြင်လိုက်တယ်:
+  - အရင်: HTTP ok ရရင် ok=true
+  - အခု: overview ရရင် + isRscJunk မဟုတ်ရင်ပဲ ok=true
+  - RSC junk ပဲရရင် fallback ကို fall-through လုပ်တယ်
+
+Commit: 7dbfeac "Filter RSC junk from ScraperAPI overview extraction"
+Push: db317dd..7dbfeac main -> main (pushed successfully)
+
+Stage Summary:
+- အခု overview ထဲမှာ RSC junk မပါတော့ဘူး။
+- ဒါပေမဲ့ **cinemm.com က ယခု post တွေ ပိတ်ထားလို့** search results 0 ပဲ ရတယ်။ getDetails ကလည်း empty ပြန်တယ်။ ScraperAPI ကလည်း SPA shell ပဲရတယ် (RSC junk စစ်ထုတ်ပြီး empty ဖြစ်သွားတယ်)။
+- ဒါကြောင့် အခု response မှာ method="fallback" ပဲ ဖြစ်မယ်။ overview ဗလာပဲ ဖြစ်မယ်။ poster-resolve ကလည်း 0 results ကြောင့် fail ဖြစ်မယ်။
+- **cinemm.com ပြန်ဖွင့်ပြီးရင်** အရာအားလုံး အလုပ်လုပ်မယ်။
