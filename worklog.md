@@ -245,3 +245,175 @@ Stage Summary:
 - Browser rendering (Playwright/ScraperAPI) တွေ လုံးဝ မလိုတော့ဘူး။
 - Direct HTTP POST နဲ့ပဲ overview ရတယ်။
 - ဒါက ရေရှည် တည်ငြိမ်တဲ့ solution ဖြစ်တယ်။
+
+---
+Task ID: telegram-bot-research
+Agent: general-purpose
+Task: Research how to integrate with @cinemmbot to fetch stream URLs
+
+Work Log:
+- Read `worklog.md` (248 lines, 5 prior task entries) for context. Key findings from previous agents:
+    * cinemm.com's `getMovieSourcesAction` (ID `40fd46d9…`) returns `{ ok: true, access: "telegram", servers: [] }` — stream URLs have been moved OUT of the HTTP API entirely.
+    * Deep links are constructed by `/api/scrape-movie/route.ts:47` as `https://t.me/cinemmbot?start=w_${type==='movie'?'m':'s'}_${id}` — but currently the app only SHOWS this link to the user; it never fetches from the bot itself.
+    * Overview scraping is already solved (via `getMovieDetailsAction(id, true)` boolean-arg breakthrough, task `BREAKTHROUGH-boolean-arg`). What is NOT solved: getting the actual stream URLs that live inside the bot.
+- Read `src/lib/cinemm.ts` (1,005 lines). Confirmed:
+    * `ACTIONS` object (lines 31–37) holds 5 Server Action IDs. NOTE: `mintFreshUuid()` at line 324 references `ACTIONS.identifyUser` which is **not declared** in `ACTIONS` — this is a latent bug (would throw `undefined` if quota-exceeded path is ever triggered) but unrelated to this research task. Mentioning it here so the next agent can fix it.
+    * `CinemmServer` interface (lines 68–72): `{ name, size, url }`.
+    * `getMovieDetails()` (line 622) and `getSeriesDetails()` (line 714) both call `getMovieSourcesAction` / analogous series action but get back empty `servers:[]` because cinemm moved sources to Telegram.
+    * `parseMovieDetailsResponse()` (line 478) is the right place to merge in Telegram-fetched servers if we add them later — it returns `CinemmMovieDetails` with `servers` already on it.
+- Searched the project for any existing Telegram integration code: `grep -i 'telegram|MTProto|telethon|gramjs|madeline'` over the whole repo. Result:
+    * NO existing MTProto / userbot code anywhere.
+    * NO `telegram`, `telethon`, `gramjs`, `tdlib`, or `mtproto` packages in `package.json`.
+    * Only Telegram-related code: `scrape-movie/route.ts` constructs deep links, `page.tsx` has a UI text-box where the user can paste their *own* bot URL (purely cosmetic deep-link generator). No actual bot interaction exists.
+- Confirmed Dockerfile uses `node:20-slim` + bun; Railway `railway.toml` does NOT currently mount a persistent volume (only healthcheck config).
+
+- Web research (4 z-ai `web_search` calls) confirmed the technical constraints of each option:
+
+  **Option A — Telegram Bot API (`core.telegram.org/bots/api`):**
+    * Verified from `core.telegram.org/bots/faq` (official): *"Bots will not be able to see messages from other bots regardless of mode."* Telegram enforces this specifically to prevent infinite bot→bot loops.
+    * Bots can only receive messages addressed TO them by HUMAN users. They cannot initiate conversations with other bots, and they cannot read messages that other bots send.
+    * **VERDICT: NOT VIABLE.** Hard Telegram-side restriction, no workaround. Adding our own bot would be useless — it cannot talk to @cinemmbot.
+
+  **Option B — MTProto user client (act as a regular Telegram user):**
+    * Libraries: **gramjs** (`npm i telegram`) for JS/TS — actively maintained, MIT licensed, full MTProto. Alternatives: Telethon (Python), MadelineProto (PHP), tdlib (C++ bindings).
+    * Confirmed from `gram.js.org` and the gramjs GitHub README: `client.session.save()` returns a `StringSession` (just a base64 string) that can be stored in an env var. This is the *recommended* way to persist login across runs.
+    * One-time setup requires: phone number + `API_ID` + `API_HASH` from `https://my.telegram.org/apps` + SMS verification code. After login, the StringSession can be reused forever (until the user actively revokes it).
+    * Flow with @cinemmbot: connect client → `client.sendMessage('cinemmbot', { message: '/start w_m_6611' })` → `client.getMessages('cinemmbot', { limit: 1 })` to read the bot's reply → parse text + `replyMarkup` (inline buttons) for stream URLs.
+    * Ban-risk research (Reddit / Telethon docs / gramjs issue #66):
+        - "Telegram seems to be banning people using 3rd party API tools" (r/Telegram).
+        - "Any third-party library is prone to cause the accounts to appear banned. Even official applications can make Telegram ban an account under certain circumstances." (docs.telethon.dev).
+        - gramjs issue #66: "Telegram hates VoIP accounts. If your number is from a real sim then a simple email to the support would fix the issue."
+        - Mitigations: (1) use a real-SIM burner number, NOT VoIP / SMS-receive services; (2) dedicated account, not the dev's personal account; (3) rate-limit strictly (≥3s between bot messages); (4) cache aggressively; (5) FloodWait-aware retry logic.
+    * **VERDICT: VIABLE, this is the recommended option.**
+
+  **Option C — Telegram Web (`web.telegram.org`) reverse engineering with Playwright:**
+    * web.telegram.org uses MTProto over WebSocket inside a service worker. The DOM is fully virtualized (canvas-like rendering of messages), so simple CSS selectors will not find message text.
+    * Requires manual QR-code scan (or 2FA password) on first login — cannot be automated in CI/Railway.
+    * Sessions expire unpredictably; re-login requires another manual scan.
+    * Cinemm already showed us how fragile SPA scraping is (worklog task `filter-rsc-junk`).
+    * **VERDICT: NOT VIABLE.** Too fragile for production, requires manual intervention.
+
+  **Option D — Telegram Desktop CLI wrappers (`tg`, `tdl`, `telegram-cli`):**
+    * These are wrappers around MTProto (tdlib or custom) and have the SAME credential requirements as Option B (phone + API_ID + API_HASH + SMS).
+    * They add a child_process spawn boundary, extra binary download, and more moving parts (CLI version drift, stdout parsing) for zero extra capability vs. gramjs direct.
+    * Only benefit: language-agnostic — could let us call Telethon (Python) from Node. But we're already in Node, so gramjs is strictly better.
+    * **VERDICT: NOT VIABLE / strictly worse than Option B** for our stack.
+
+- Railway deployment analysis for Option B:
+    * Confirmed from `docs.railway.com/volumes`: Railway supports persistent volumes. You attach one via Settings → Volumes → Add, give it a mount path (e.g. `/data`), and the contents survive redeploys.
+    * **HOWEVER**, gramjs `StringSession` is a base64 string — it can be stored as a Railway env var (`TELEGRAM_SESSION`), which is even simpler than a volume and survives restarts automatically. No volume mount strictly required.
+    * Caveat: Railway is "serverless-ish" — instances spin down during idle and can be replaced. A long-lived MTProto connection cannot be assumed. Our integration must be **request-scoped**: connect → fetch → disconnect on every API call. This adds ~2–4s of connect overhead per request, but is the only safe pattern for Railway. Mitigate with aggressive caching (already have `src/lib/cache.ts`, 24h TTL).
+    * First-time login CANNOT happen on Railway (needs interactive SMS prompt). Workflow: run login script locally → it prints `StringSession` to stdout → paste that string into Railway env var `TELEGRAM_SESSION`. Documented in gramjs README.
+
+Stage Summary:
+- **RECOMMENDED OPTION: B (gramjs MTProto user client)** — it is the only technically viable option. Bot API is blocked by Telegram's bot-to-bot rule; Telegram Web is too fragile; CLI wrappers add no value over gramjs direct.
+
+- **KEY TECHNICAL REQUIREMENTS:**
+    1. **Credentials (all stored as Railway env vars):**
+       - `TELEGRAM_API_ID` — numeric, from `https://my.telegram.org/apps`
+       - `TELEGRAM_API_HASH` — 32-char hex string, from same
+       - `TELEGRAM_SESSION` — base64 `StringSession` produced by one-time local login script
+       - `TELEGRAM_BOT_USERNAME` — `cinemmbot` (so we can swap easily if cinemm renames the bot)
+       - `TELEGRAM_PHONE` — only needed for re-login if session dies (optional)
+    2. **npm packages to add:**
+       - `telegram` (gramjs — the official package name on npm is `telegram`, not `gramjs`)
+       - `input` (gramjs helper for interactive prompts during local-only login; can be skipped if we write the login script to read from stdin)
+    3. **One-time setup steps (run LOCALLY, not on Railway):**
+       a. Sign up a fresh Telegram account using a real-SIM burner number (NOT a VoIP / SMS-receive number — these get auto-banned per gramjs issue #66).
+       b. Visit `https://my.telegram.org/apps` → create app → copy `api_id` + `api_hash`.
+       c. Run `node scripts/telegram-login.mjs` (script to be written by next agent) — prompts for phone, then SMS code, then optional 2FA password, prints `StringSession`.
+       d. Paste `StringSession` into Railway env var `TELEGRAM_SESSION`.
+    4. **Code architecture (how it integrates with `/api/scrape-movie`):**
+       - New file `src/lib/telegram-cinemm.ts` exposing `fetchStreamUrlsFromBot(deepLink: string): Promise<{ servers: CinemmServer[]; raw: string }>`:
+           1. Parse `w_m_<id>` or `w_s_<id>` from the deep-link `start=` parameter (or accept `(type, id)` directly).
+           2. Connect gramjs client using `StringSession(process.env.TELEGRAM_SESSION!)`.
+           3. `await client.sendMessage('cinemmbot', { message: '/start ' + payload })`.
+           4. Poll `client.getMessages('cinemmbot', { limit: 1 })` with a timeout (~10s, max 3 polls with 1s sleep — bots usually reply within 2–5s).
+           5. Parse the bot's reply: extract URLs from message text (regex for `https?://`), and from `msg.replyMarkup.rows[].buttons[].url` for inline-keyboard buttons. Filter to known streaming hosts (or just collect all URLs and let the UI dedupe).
+           6. `await client.disconnect()` (DO NOT leave connected — Railway reuses processes unpredictably and MTProto connections don't survive sleeps well).
+           7. Return `{ servers, raw }`.
+       - In `scrape-movie/route.ts`, after Step 1 (getDetails) returns `access: 'telegram'` with empty `servers`, add a new **Step 1.5**: try `fetchStreamUrlsFromBot()`. If it returns servers, populate `streamUrls` and return. If it throws (session expired, network, timeout), fall through to existing fallback (deep-link only).
+       - Cache the bot's reply per-movie-id in `src/lib/cache.ts` with a long TTL (e.g. 7 days — stream URLs are stable per movie). This is critical to avoid hitting the bot on every page load.
+       - Add a `/api/telegram-status` route that pings `client.getMe()` to surface session-alive state for debugging.
+    5. **Pros of Option B:**
+       - Actually works (only viable option).
+       - gramjs is mature, full-featured, MIT licensed.
+       - `StringSession` survives Railway restarts as an env var — no volume mount needed.
+       - One-time setup; after that, fully automated.
+       - Aggressive caching makes per-request cost negligible.
+    6. **Cons / Risks of Option B:**
+       - **BAN RISK (biggest)**: The burner account could be auto-banned by Telegram's anti-abuse heuristics. Mitigations: real-SIM number, dedicated account, ≥3s between bot messages, cache aggressively, monitor for `SESSION_REVOKED` / `USER_DEACTIVATED` errors and alert.
+       - **Fragile to bot changes**: If cinemm changes the bot username, the message format, or adds a captcha, the parser breaks. Mitigation: log every bot reply (truncated) for forensic analysis; design parser to be lenient (extract any URL, not specific markup).
+       - **Connect latency**: ~2–4s per cold call for MTProto handshake. Mitigation: cache hit-rate >95% in steady state.
+       - **ToS gray area**: Telegram ToS technically forbids automating user accounts for "bot-like" behavior. They rarely enforce for low-volume use but the risk is nonzero. The dedicated-burner-account strategy contains the blast radius — if banned, only the burner is lost, not the main app.
+       - **Session death**: If the user logs out of the burner account from another device, or Telegram revokes the session, the integration breaks silently. Mitigation: `/api/telegram-status` healthcheck + alert.
+    7. **Will it work on Railway?** YES, with caveats:
+       - Use env-var `StringSession` (not volume file) — simplest, survives redeploys.
+       - Request-scoped connect/disconnect (do NOT hold a long-lived client in module scope — Railway may keep a process warm for hours then kill it without warning, leaving a half-open MTProto socket).
+       - First-time login MUST happen locally; the login script cannot run on Railway (no interactive TTY for SMS code).
+       - Add `maxDuration` bump on the scrape-movie route (currently 60s) — bot reply + parsing + caching fits comfortably but the gramjs connect can be slow on cold start.
+
+- **RISKS AND MITIGATIONS summary (for the next agent who implements this):**
+    | Risk | Likelihood | Mitigation |
+    |------|-----------|------------|
+    | Burner account auto-ban | Medium | Real-SIM number, dedicated account, rate-limit (≥3s/msg), cache aggressively |
+    | @cinemmbot changes message format | Medium | Log all replies, lenient URL extraction, parser unit-tests with sample messages |
+    | Session revoked / expired | Low | Healthcheck route, alert on `AuthKeyError` / `SESSION_REVOKED`, doc the re-login procedure |
+    | Bot never replies / captcha | Low | 10s timeout → fall through to deep-link-only fallback (current behavior) |
+    | Railway cold-start latency | Low | Cache hit-rate >95%, request-scoped client, optional: warm-up ping on app boot |
+    | ToS enforcement | Low | Low volume, dedicated burner, don't spam —Telegram tolerates light userbot use |
+
+- **ACTION ITEMS FOR NEXT AGENT (do NOT do here — research-only task):**
+    1. Obtain a real-SIM burner phone number and create a fresh Telegram account.
+    2. Register an app at `https://my.telegram.org/apps` → record `api_id` + `api_hash`.
+    3. `npm i telegram input` (gramjs + interactive prompt helper).
+    4. Write `scripts/telegram-login.mjs` that produces a `StringSession` string.
+    5. Run the login script locally, capture the session string.
+    6. Add 3 env vars to Railway: `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION`.
+    7. Write `src/lib/telegram-cinemm.ts` with `fetchStreamUrlsFromBot(deepLink)` — request-scoped connect, ≥3s rate-limit, 10s reply timeout, lenient URL extraction from text + inline buttons.
+    8. Wire it into `scrape-movie/route.ts` as new Step 1.5 (between getDetails and Playwright). Add `method: 'telegram-bot'` to the response shape.
+    9. Add caching with 7-day TTL in `src/lib/cache.ts` for bot replies (key `tg:w_m_<id>` / `tg:w_s_<id>`).
+    10. Add `/api/telegram-status` GET route returning `{ sessionAlive, me }` for monitoring.
+    11. **Side-fix:** add `identifyUser: '<action-id>'` to the `ACTIONS` object in `cinemm.ts:31` (referenced at line 324 but missing — would crash the quota-refresh path). The action ID can be recovered from cinemm.com's bundled JS by grepping for `createServerReference("…", ..., "identifyUserAction")`.
+    12. Capture one real bot reply (e.g. for Inception, `w_m_6611`) and save it as a fixture `src/lib/__fixtures__/cinemmbot-reply.txt` so the parser can be unit-tested without hitting Telegram.
+
+---
+Task ID: telegram-bot-integration
+Agent: main (Super Z)
+Task: Telegram bot (@cinemmbot) integration ထည့် — stream URLs ရယူ
+
+Work Log:
+- Research agent (telegram-bot-research) ကန gramjs (MTProto user client) ကို ထောက်ခံတယ်။
+- npm install telegram input လုပ်တယ်။
+- အသစ်တည်ဆောက်တဲ့ files:
+  1. scripts/telegram-login.mjs — one-time login script
+  2. src/lib/telegram-cinemm.ts — main library (fetchStreamUrlsFromBot, checkTelegramSession)
+  3. src/app/api/telegram-status/route.ts — healthcheck endpoint
+  4. src/app/api/scrape-movie/route.ts — Step 1.5 (Telegram bot) ထည့်ပြီး
+  5. src/lib/cinemm.ts — mintFreshUuid() bug ပြင် (dead code, return null)
+
+- Architecture:
+  - getDetails() က overview ရပြီး servers ဗလာဖြစ်ရင် → Telegram bot ကို query လုပ်တယ်
+  - 7-day cache (stream URLs change ရှားလို့)
+  - 3-second rate limit (FloodWait ရှောင်ဖို့)
+  - 15-second reply timeout
+  - SESSION_REVOKED detection
+  - FloodWait-aware retry
+
+- gramjs patterns:
+  - StringSession (env var ထဲမှာ သိမ်း) — Railway restart ကြာင့် မပျက်
+  - Request-scoped connect/disconnect — long-lived sockets Railway မှာ break
+  - getMessages() polling — bot reply ကို detect
+
+Commit: e1c6594 "Add Telegram bot integration for stream URL extraction"
+Push: 4cd308d..e1c6594 main -> main (pushed successfully)
+
+Stage Summary:
+- Code အားလုံး ready! ဒါပေမဲ့ အသုံးပြုဖို့ user (Bro) က နေ setup လုပ်ရမယ်:
+  1. Burner Telegram account (real SIM, not VoIP)
+  2. https://my.telegram.org/apps မှာ app register လုပ် → API_ID + API_HASH ရ
+  3. Local မှာ: TELEGRAM_API_ID=xxx TELEGRAM_API_HASH=yyy node scripts/telegram-login.mjs
+  4. Railway env vars ထည့်: TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION, TELEGRAM_BOT_USERNAME=cinemmbot
+  5. Test: GET /api/telegram-status → { connected: true }
+
+- ဒါပြီးရင် /api/scrape-movie က overview + poster + telegramStreamUrls အပြည့် ပြန်မယ်။
