@@ -43,6 +43,10 @@ interface MovieDetails {
   source: string
   overview: string
   servers: Server[]
+  // New: stream URLs fetched from @cinemmbot Telegram bot
+  telegramStreamUrls?: string[]
+  telegramError?: string | null
+  telegramCached?: boolean
   remaining: number
   error?: string | null
   fetchedAt: string
@@ -58,6 +62,10 @@ interface SeriesDetails {
   source: string
   overview: string
   seasons: Season[]
+  // New: stream URLs fetched from @cinemmbot Telegram bot
+  telegramStreamUrls?: string[]
+  telegramError?: string | null
+  telegramCached?: boolean
   remaining: number
   error?: string | null
   fetchedAt: string
@@ -1739,6 +1747,7 @@ function DetailsView({
 }: DetailsViewProps) {
   const hasServers = details.type === 'movie' && details.servers.length > 0
   const hasSeasons = details.type === 'series' && details.seasons.length > 0
+  const hasTelegramUrls = !!details.telegramStreamUrls && details.telegramStreamUrls.length > 0
   const hasOverview = !!details.overview
   const isQuotaExceeded = details.error === 'QUOTA_EXCEEDED'
 
@@ -1911,6 +1920,28 @@ function DetailsView({
                 </div>
               </a>
             ))}
+          </div>
+        </section>
+      )}
+
+      {/* Telegram Stream Links (new!) — fetched automatically from @cinemmbot */}
+      {hasTelegramUrls && (
+        <TelegramStreamLinks
+          urls={details.telegramStreamUrls!}
+          cached={!!details.telegramCached}
+        />
+      )}
+      {details.telegramError && !hasTelegramUrls && (
+        <section className="rounded-lg border border-amber-900/40 bg-amber-950/20 p-3 text-xs">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-semibold text-amber-200">Telegram bot fetch failed</div>
+              <div className="text-amber-300/70 mt-1">{details.telegramError}</div>
+              <div className="text-amber-300/50 mt-1">
+                You can still use the &quot;Get Links via Telegram&quot; button above to fetch manually.
+              </div>
+            </div>
           </div>
         </section>
       )}
@@ -2445,6 +2476,158 @@ function ManualLinksEditor({
           </div>
         </div>
       )}
+    </section>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// TelegramStreamLinks — displays stream URLs fetched automatically from
+// @cinemmbot. Each URL gets a copy button + open button + quality badge.
+// ---------------------------------------------------------------------------
+function TelegramStreamLinks({ urls, cached }: { urls: string[]; cached: boolean }) {
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
+
+  // Parse quality + format from URL — e.g. ...Inception.2010.UHD.BluRay.2160p.4K...mkv
+  function parseQuality(url: string): string {
+    const m = url.match(/(8K|4K|2160p|1080p|720p|480p)/i)
+    return m ? m[1].toUpperCase() : 'STD'
+  }
+  function parseFormat(url: string): string {
+    const m = url.match(/\.(mkv|mp4|avi|mov|webm)(?:\?|$)/i)
+    return m ? m[1].toUpperCase() : ''
+  }
+  function parseSource(url: string): string {
+    try {
+      const u = new URL(url)
+      const host = u.hostname.replace(/^www\./, '').split('.')[0]
+      return host.charAt(0).toUpperCase() + host.slice(1)
+    } catch {
+      return 'Unknown'
+    }
+  }
+  function parseFileName(url: string): string {
+    try {
+      const u = new URL(url)
+      const parts = u.pathname.split('/').filter(Boolean)
+      const last = parts[parts.length - 1]
+      return last ? decodeURIComponent(last) : ''
+    } catch {
+      return ''
+    }
+  }
+
+  async function copyToClipboard(text: string, idx: number) {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopiedIdx(idx)
+      toast.success('URL copied to clipboard')
+      setTimeout(() => setCopiedIdx(null), 2000)
+    } catch {
+      toast.error('Failed to copy')
+    }
+  }
+
+  return (
+    <section className="rounded-lg border border-violet-800/40 bg-gradient-to-br from-violet-950/30 via-zinc-950/40 to-fuchsia-950/20 p-3 sm:p-4">
+      <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
+        <h3 className="text-sm font-semibold text-violet-100 flex items-center gap-2">
+          <Send className="w-4 h-4 text-violet-400" />
+          Stream Links
+          <Badge variant="outline" className="border-violet-700/50 text-violet-300 ml-1">
+            {urls.length}
+          </Badge>
+        </h3>
+        <div className="flex items-center gap-2 text-xs">
+          {cached ? (
+            <Badge variant="outline" className="border-emerald-700/50 text-emerald-300 bg-emerald-950/30">
+              <Check className="w-3 h-3 mr-1" /> Cached
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="border-violet-700/50 text-violet-300 bg-violet-950/30">
+              <Send className="w-3 h-3 mr-1" /> From @cinemmbot
+            </Badge>
+          )}
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        {urls.map((url, i) => {
+          const quality = parseQuality(url)
+          const format = parseFormat(url)
+          const source = parseSource(url)
+          const fileName = parseFileName(url)
+          const isCopied = copiedIdx === i
+
+          // Color code by quality
+          const qualityColor =
+            quality === '4K' || quality === '8K'
+              ? 'border-fuchsia-600/50 bg-fuchsia-950/30 text-fuchsia-300'
+              : quality === '2160p'
+              ? 'border-purple-600/50 bg-purple-950/30 text-purple-300'
+              : quality === '1080p'
+              ? 'border-blue-600/50 bg-blue-950/30 text-blue-300'
+              : quality === '720p'
+              ? 'border-emerald-600/50 bg-emerald-950/30 text-emerald-300'
+              : 'border-zinc-700 bg-zinc-900/40 text-zinc-300'
+
+          return (
+            <div
+              key={i}
+              className="rounded-md border border-zinc-800 bg-zinc-950/60 hover:border-violet-700/50 transition-colors overflow-hidden"
+            >
+              {/* Top row: quality badges + source */}
+              <div className="flex items-center gap-2 px-3 py-2 border-b border-zinc-800/60 bg-zinc-900/40">
+                <Badge variant="outline" className={`text-xs ${qualityColor}`}>
+                  {quality === '4K' || quality === '8K' ? `🎬 ${quality}` : quality}
+                </Badge>
+                {format && (
+                  <Badge variant="outline" className="border-zinc-700 text-zinc-400 text-xs">
+                    {format}
+                  </Badge>
+                )}
+                <Badge variant="outline" className="border-zinc-700 text-zinc-500 text-xs">
+                  {source}
+                </Badge>
+                <div className="ml-auto text-xs text-zinc-500 truncate">{fileName || url}</div>
+              </div>
+
+              {/* Bottom row: action buttons */}
+              <div className="flex items-center gap-2 px-3 py-2">
+                <button
+                  onClick={() => copyToClipboard(url, i)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium transition-colors"
+                >
+                  {isCopied ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                      Copied!
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5" />
+                      Copy URL
+                    </>
+                  )}
+                </button>
+                <a
+                  href={url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-violet-600 hover:bg-violet-500 text-white text-xs font-medium transition-colors"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  Open Stream
+                </a>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      <div className="mt-3 text-[11px] text-zinc-500 flex items-center gap-1.5">
+        <Send className="w-3 h-3" />
+        Auto-fetched via @cinemmbot — URLs are valid for ~7 days. Click &quot;Open Stream&quot; to play in browser or &quot;Copy URL&quot; to paste in a downloader.
+      </div>
     </section>
   )
 }
