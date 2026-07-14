@@ -659,30 +659,30 @@ export async function getMovieDetails(
     } catch {
       // Sources call failed — continue with details only
     }
-    
-    // If API returned no overview, try Playwright scrape as fallback.
-    // cinemm.com's new API returns overview="$undefined" — but the browser
-    // renders the full overview text. Playwright simulates a real browser.
+
+    // If API returned no overview, try /api/scrape-movie (Playwright or HTTP fallback).
+    // cinemm.com's new API returns overview="$undefined" for movies.
     if (!result.overview && !result.error) {
       try {
-        const scrapeUrl = `${CINEMM_ORIGIN.replace('https://cinemm.com', '')}/api/scrape-movie?id=${id}&type=movie&source=${source}&name=${encodeURIComponent(name ?? '')}&year=${encodeURIComponent(year ?? '')}&poster=${encodeURIComponent(poster ?? '')}`
-        const scrapeRes = await fetch(`http://localhost:3000${scrapeUrl}`)
+        const scrapeUrl = `/api/scrape-movie?id=${id}&type=movie&source=${source}&name=${encodeURIComponent(name ?? '')}&year=${encodeURIComponent(year ?? '')}&poster=${encodeURIComponent(poster ?? '')}`
+        const scrapeRes = await fetch(scrapeUrl)
         if (scrapeRes.ok) {
           const scrapeData = await scrapeRes.json() as {
             overview?: string
             telegramLink?: string | null
             streamUrls?: string[]
+            method?: string
           }
           if (scrapeData.overview && scrapeData.overview.length > 50) {
             result.overview = scrapeData.overview
           }
         }
       } catch {
-        // Playwright scrape failed — continue with what we have
+        // Scrape failed — continue with what we have
       }
     }
 
-    // Return what we have
+    // Return what we have — UI shows movie info + Telegram button
     if (!result.error) await setCached(key, result)
     return result
   }

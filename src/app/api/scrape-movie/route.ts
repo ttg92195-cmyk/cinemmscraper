@@ -118,9 +118,10 @@ export async function GET(req: NextRequest) {
       overview = myanmarMatch[1].trim()
     }
 
-    // Look for Telegram link
-    const telegramMatch = html.match(/https:\/\/t\.me\/cinemmbot\?start=w_[a-z]_\d+/) || fullData.match(/https:\/\/t\.me\/cinemmbot\?start=w_[a-z]_\d+/)
-    const telegramLink = telegramMatch ? telegramMatch[0] : null
+    // Look for Telegram link — construct it from the movie ID
+    // cinemm.com's format: https://t.me/cinemmbot?start=w_m_<movieId>
+    // For series: w_s_<seriesId>, for episodes: w_e_<episodeId>
+    const telegramLink = `https://t.me/cinemmbot?start=w_${type === 'movie' ? 'm' : 's'}_${id}`
 
     // Look for stream URLs
     const streamUrls = html.match(/https:\/\/stream\.(cmreel|bioscopeapp)\.com\/file\/[^\s"'<>]+/g) || []
