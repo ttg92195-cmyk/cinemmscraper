@@ -1,0 +1,1000 @@
+     1→     1→/**
+     2→     2→ * Cinemm.com Client
+     3→     3→ * -----------------
+     4→     4→ * Calls cinemm.com's Next.js Server Actions directly to fetch:
+     5→     5→ *   - Search results (movies & series)
+     6→     6→ *   - Movie details (servers + overview)
+     7→     7→ *   - Series details (overview with embedded seasons/episodes info)
+     8→     8→ *
+     9→     9→ * The site uses Next.js Server Actions, so we POST to "/" with the
+    10→    10→ * "Next-Action: <action-id>" header and a JSON-encoded args array as
+    11→    11→ * the body. The response is in React Server Component (RSC) wire format:
+    12→    12→ *   <id>:<json>            — JSON value
+    13→    13→ *   <id>:T<hex-len>,<text> — chunked text
+    14→    14→ * where <id> is a hex line key. The action's return value is on line "1:"
+    15→    15→ * (when present). Long text values appear on higher-numbered lines as
+    16→    16→ * "T" chunks and are referenced from the JSON as "$<id>".
+    17→    17→ */
+    18→    18→
+    19→    19→import { getCache, setCache } from '@/lib/cache'
+    20→    20→
+    21→    21→const CINEMM_ORIGIN = 'https://cinemm.com'
+    22→    22→
+    23→    23→// Server Action IDs (extracted from cinemm.com's bundled JS — updated 2026-07-10
+    24→    24→// after cinemm.com removed the UUID/quota system and changed all action IDs).
+    25→    25→const ACTIONS = {
+    26→    26→  search:              '608f37e00992dd40df0badde8f2f45e5db62a48046',
+    27→    27→  getMovieServers:     '60663b32ebac1369c06f990ebeed80f0ec3101d061', // getMovieDetailsAction
+    28→    28→  getSeriesDetails:    '40011a39f4c37fb76852c6cc01a17bd20e98784283',
+    29→    29→  getEpisodeServers:   '60bebae00379fff9c39e9dccf659b024a89da4b5b4', // getEpisodeSourcesAction
+    30→    30→} as const
+    31→    31→
+    32→    32→const COMMON_HEADERS = {
+    33→    33→  'User-Agent':
+    34→    34→    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    35→    35→  Accept: 'text/x-component',
+    36→    36→  'Content-Type': 'text/plain;charset=UTF-8',
+    37→    37→  'Next-Router-State-Tree':
+    38→    38→    '%5B%22%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%5D%7D%2Cnull%2Cnull%2Ctrue%5D',
+    39→    39→  Referer: `${CINEMM_ORIGIN}/`,
+    40→    40→  Origin: CINEMM_ORIGIN,
+    41→    41→} as const
+    42→    42→
+    43→    43→// ---------------------------------------------------------------------------
+    44→    44→// Types
+    45→    45→// ---------------------------------------------------------------------------
+    46→    46→
+    47→    47→export type MediaType = 'movie' | 'series'
+    48→    48→
+    49→    49→export interface CinemmSearchItem {
+    50→    50→  id: number
+    51→    51→  name: string
+    52→    52→  year: string
+    53→    53→  poster: string
+    54→    54→  type: MediaType
+    55→    55→  source: string
+    56→    56→  tmdbId?: string | null
+    57→    57→  imdbId?: string | null
+    58→    58→  overview?: string | null
+    59→    59→}
+    60→    60→
+    61→    61→export interface CinemmServer {
+    62→    62→  name: string
+    63→    63→  size: string  // 'N/A' when source returns null
+    64→    64→  url: string
+    65→    65→}
+    66→    66→
+    67→    67→/** A single episode inside a season (returned by getSeriesDetails). */
+    68→    68→export interface CinemmEpisode {
+    69→    69→  id: number
+    70→    70→  tv_show_id: number
+    71→    71→  season_id: number
+    72→    72→  season_number: number
+    73→    73→  season_name: string
+    74→    74→  tmdb_episode_id: number | null
+    75→    75→  previous_episode_id: number | null
+    76→    76→  next_episode_id: number | null
+    77→    77→  name: string
+    78→    78→  poster: string
+    79→    79→  episode_number: number
+    80→    80→  runtime: string
+    81→    81→  air_date: string
+    82→    82→  is_last_play: number
+    83→    83→  only_bioscope: number
+    84→    84→  is_exclusive: number
+    85→    85→  exclusive_text: string
+    86→    86→  mobile_exclusive_text: string
+    87→    87→  resume_time: string | null
+    88→    88→  tvshow_streaming_links: unknown[]
+    89→    89→  tvshow_download_links: unknown[]
+    90→    90→}
+    91→    91→
+    92→    92→/** A season inside a series (returned by getSeriesDetails). */
+    93→    93→export interface CinemmSeason {
+    94→    94→  id: number
+    95→    95→  name: string
+    96→    96→  is_end: number
+    97→    97→  episodes: CinemmEpisode[]
+    98→    98→}
+    99→    99→
+   100→   100→/** Episode servers (returned by getEpisodeServers). */
+   101→   101→export interface CinemmEpisodeDetails {
+   102→   102→  episodeId: number
+   103→   103→  servers: CinemmServer[]
+   104→   104→  remaining: number
+   105→   105→  error: string | null
+   106→   106→  fetchedAt: string
+   107→   107→}
+   108→   108→
+   109→   109→export interface CinemmMovieDetails {
+   110→   110→  id: number
+   111→   111→  name: string
+   112→   112→  year: string
+   113→   113→  poster: string
+   114→   114→  type: 'movie'
+   115→   115→  source: string
+   116→   116→  overview: string
+   117→   117→  servers: CinemmServer[]
+   118→   118→  remaining: number
+   119→   119→  error?: string | null
+   120→   120→  fetchedAt: string
+   121→   121→  sourceUrl: string
+   122→   122→}
+   123→   123→
+   124→   124→export interface CinemmSeriesDetails {
+   125→   125→  id: number
+   126→   126→  name: string
+   127→   127→  year: string
+   128→   128→  poster: string
+   129→   129→  type: 'series'
+   130→   130→  source: string
+   131→   131→  overview: string
+   132→   132→  seasons: CinemmSeason[]
+   133→   133→  remaining: number
+   134→   134→  error?: string | null
+   135→   135→  fetchedAt: string
+   136→   136→  sourceUrl: string
+   137→   137→}
+   138→   138→
+   139→   139→export type CinemmDetails = CinemmMovieDetails | CinemmSeriesDetails
+   140→   140→
+   141→   141→// ---------------------------------------------------------------------------
+   142→   142→// RSC response parser
+   143→   143→// ---------------------------------------------------------------------------
+   144→   144→//
+   145→   145→// The RSC wire format is line-oriented. Each line is "<id>:<payload>" where
+   146→   146→// <id> is a hex string. Text chunks have a "T<hex>," prefix before the
+   147→   147→// payload, e.g. "10:T16cc,text...". Text payloads may contain embedded
+   148→   148→// newlines, so we must consume subsequent physical lines until we see a
+   149→   149→// new "<id>:" prefix.
+   150→   150→//
+   151→   151→// IMPORTANT BUG WORKAROUND: cinemm.com's RSC serialization sometimes forgets
+   152→   152→// to insert a newline between the end of a text chunk (line "10:") and the
+   153→   153→// next RSC line (line "1:"). The result is that the JSON return value
+   154→   154→// appears *concatenated* to the end of the text content, e.g.:
+   155→   155→//
+   156→   156→//   10:T16cc,Some overview text...Translated by Mr.Anderson1:{"servers":[...]}
+   157→   157→//
+   158→   158→// To handle this, after collecting each text chunk we look for an embedded
+   159→   159→// "<hex>:{...}" pattern (JSON return value glued to the end of the text)
+   160→   160→// and split it out as a separate line entry.
+   161→   161→
+   162→   162→const LINE_START_RE = /^([0-9a-f]+):(T[0-9a-f]+,)?/
+   163→   163→
+   164→   164→function parseRsc(text: string): Map<string, string> {
+   165→   165→  const result = new Map<string, string>()
+   166→   166→  const lines = text.split('\n')
+   167→   167→  let i = 0
+   168→   168→  while (i < lines.length) {
+   169→   169→    const line = lines[i]
+   170→   170→    const m = line.match(LINE_START_RE)
+   171→   171→    if (!m) {
+   172→   172→      i++
+   173→   173→      continue
+   174→   174→    }
+   175→   175→    const id = m[1]
+   176→   176→    const isText = !!m[2]
+   177→   177→    const payloadStart = m[0].length
+   178→   178→    let payload = line.substring(payloadStart)
+   179→   179→    if (isText) {
+   180→   180→      // Text chunks may span multiple physical newlines because the content
+   181→   181→      // itself contains \n. Append following lines until we see a new id prefix.
+   182→   182→      i++
+   183→   183→      while (i < lines.length) {
+   184→   184→        const next = lines[i]
+   185→   185→        if (LINE_START_RE.test(next) && next.length > 0) break
+   186→   186→        payload += '\n' + next
+   187→   187→        i++
+   188→   188→      }
+   189→   189→      // Check for a glued JSON return value at the end of the text.
+   190→   190→      // The action's return value always lives on RSC line "1:".
+   191→   191→      // We look for "1:{" patterns in the payload. To distinguish a real
+   192→   192→      // RSC line "1:" from a coincidental "1:" inside text content (like
+   193→   193→      // "Drama1:" or "Step1:"), we require that the JSON after "1:{" must
+   194→   194→      // be valid (parseable) and span to the end of the payload (after
+   195→   195→      // trimming trailing whitespace/newlines).
+   196→   196→      const markerStr = '1:{'
+   197→   197→      let searchFrom = payload.length
+   198→   198→      while (true) {
+   199→   199→        const markerPos = payload.lastIndexOf(markerStr, searchFrom)
+   200→   200→        if (markerPos <= 0) break
+   201→   201→        const afterMarker = payload.substring(markerPos + markerStr.length)
+   202→   202→        const trimmedAfter = afterMarker.trimEnd()
+   203→   203→        if (trimmedAfter.endsWith('}')) {
+   204→   204→          const candidateJson = '{' + trimmedAfter
+   205→   205→          try {
+   206→   206→            JSON.parse(candidateJson)
+   207→   207→            // Valid JSON found — this is the glued return value.
+   208→   208→            // Strip the JSON (and any trailing whitespace) from the payload.
+   209→   209→            payload = payload.substring(0, markerPos).trimEnd()
+   210→   210→            result.set('1', candidateJson)
+   211→   211→            break
+   212→   212→          } catch {
+   213→   213→            // Not valid JSON, keep searching backwards.
+   214→   214→          }
+   215→   215→        }
+   216→   216→        searchFrom = markerPos - 1
+   217→   217→      }
+   218→   218→    } else {
+   219→   219→      i++
+   220→   220→    }
+   221→   221→    result.set(id, payload)
+   222→   222→  }
+   223→   223→  return result
+   224→   224→}
+   225→   225→
+   226→   226→// ---------------------------------------------------------------------------
+   227→   227→// Low-level action call (with retry & quota backoff)
+   228→   228→// ---------------------------------------------------------------------------
+   229→   229→
+   230→   230→async function callAction(
+   231→   231→  actionId: string,
+   232→   232→  args: unknown[],
+   233→   233→  opts: { retries?: number; visitorUuid?: string | null } = {},
+   234→   234→): Promise<{ lines: Map<string, string>; raw: string }> {
+   235→   235→  const retries = opts.retries ?? 1
+   236→   236→  let lastError: unknown = null
+   237→   237→  for (let attempt = 0; attempt <= retries; attempt++) {
+   238→   238→    try {
+   239→   239→      const body = JSON.stringify(args)
+   240→   240→      const headers: Record<string, string> = {
+   241→   241→        ...COMMON_HEADERS,
+   242→   242→        'Next-Action': actionId,
+   243→   243→      }
+   244→   244→      // When the user supplies their own cinemm.com visitor UUID, send it
+   245→   245→      // as a cookie. cinemm.com tracks quota per UUID, so using a known-good
+   246→   246→      // UUID (minted via cinemm.com directly) bypasses our auto-refresh logic
+   247→   247→      // and its IP rate-limiting side effects.
+   248→   248→      if (opts.visitorUuid) {
+   249→   249→        headers['Cookie'] = `user_uuid=${opts.visitorUuid}`
+   250→   250→      }
+   251→   251→      const res = await fetch(CINEMM_ORIGIN + '/', {
+   252→   252→        method: 'POST',
+   253→   253→        headers,
+   254→   254→        body,
+   255→   255→      })
+   256→   256→      if (!res.ok) {
+   257→   257→        throw new Error(`cinemm.com action ${actionId} failed: HTTP ${res.status}`)
+   258→   258→      }
+   259→   259→      const text = await res.text()
+   260→   260→      return { lines: parseRsc(text), raw: text }
+   261→   261→    } catch (e) {
+   262→   262→      lastError = e
+   263→   263→      // Brief backoff before retry
+   264→   264→      if (attempt < retries) await new Promise((r) => setTimeout(r, 500))
+   265→   265→    }
+   266→   266→  }
+   267→   267→  throw lastError instanceof Error ? lastError : new Error('Unknown error calling cinemm.com')
+   268→   268→}
+   269→   269→
+   270→   270→/**
+   271→   271→ * Call the identifyUserAction to mint a fresh visitor UUID. cinemm.com tracks
+   272→   272→ * quota per-visitor-UUID (each visitor gets a few free detail fetches before
+   273→   273→ * QUOTA_EXCEEDED). By calling this before a detail fetch, we can request a
+   274→   274→ * fresh UUID with full quota.
+   275→   275→ *
+   276→   276→ * IP-based rate limiting: cinemm.com limits how many UUIDs a single IP can
+   277→   277→ * mint within a short window. If we mint too many too fast, the IP gets
+   278→   278→ * rate-limited and subsequent identifyUserAction calls return a stale UUID
+   279→   279→ * instead of a fresh one. To mitigate this:
+   280→   280→ *
+   281→   281→ *   1. We pre-warm a small pool of UUIDs (3) on first quota-exceeded event.
+   282→   282→ *   2. We serve UUIDs from the pool first before minting new ones.
+   283→   283→ *   3. We respect a cooldown between mint attempts to avoid rate-limiting.
+   284→   284→ *   4. We detect rate-limited responses (stale UUID / zero remaining) and
+   285→   285→ *      return a sentinel error so callers can surface a clear message.
+   286→   286→ *
+   287→   287→ * Note: the site's Set-Cookie response associates the UUID with future
+   288→   288→ * requests automatically; we don't need to do anything special with it.
+   289→   289→ * Returns the visitor info object.
+   290→   290→ */
+   291→   291→
+   292→   292→interface VisitorInfo {
+   293→   293→  uuid: string
+   294→   294→  pin: string
+   295→   295→  usageCount: number
+   296→   296→  lastReset: string
+   297→   297→  isPremium: boolean
+   298→   298→  bonusCredits: number
+   299→   299→  remaining: number
+   300→   300→}
+   301→   301→
+   302→   302→// In-memory UUID pool. Survives across requests within the same server
+   303→   303→// process. Cleared on server restart (which is fine — fresh start).
+   304→   304→const uuidPool: VisitorInfo[] = []
+   305→   305→const POOL_TARGET_SIZE = 3
+   306→   306→const MINT_COOLDOWN_MS = 2000 // 2s between mint attempts
+   307→   307→let lastMintAt = 0
+   308→   308→// Single-flight guard so concurrent callers don't all mint at once.
+   309→   309→let inflightMint: Promise<VisitorInfo | null> | null = null
+   310→   310→
+   311→   311→async function mintFreshUuid(): Promise<VisitorInfo | null> {
+   312→   312→  // Generate a random fingerprint-like ID (the site accepts any string)
+   313→   313→  const fp = Array.from({ length: 20 }, () =>
+   314→   314→    Math.floor(Math.random() * 16).toString(16),
+   315→   315→  ).join('')
+   316→   316→  try {
+   317→   317→    const { lines } = await callAction(ACTIONS.identifyUser, [fp, undefined])
+   318→   318→    const raw = lines.get('1')
+   319→   319→    if (!raw) return null
+   320→   320→    const info = JSON.parse(raw) as VisitorInfo
+   321→   321→    // Detect rate-limited / stale UUID: if remaining is 0 on a fresh mint,
+   322→   322→    // the IP is rate-limited and cinemm.com returned an exhausted UUID.
+   323→   323→    if (info.remaining <= 0) {
+   324→   324→      return null
+   325→   325→    }
+   326→   326→    return info
+   327→   327→  } catch (e) {
+   328→   328→    console.error('mintFreshUuid failed:', e)
+   329→   329→    return null
+   330→   330→  }
+   331→   331→}
+   332→   332→
+   333→   333→/**
+   334→   334→ * Get a visitor UUID with quota remaining. Tries the pool first, then mints
+   335→   335→ * a new one (with cooldown to avoid IP rate-limiting).
+   336→   336→ */
+   337→   337→async function getUsableUuid(): Promise<VisitorInfo | null> {
+   338→   338→  // 1. Try to drain an entry from the pool that still has remaining quota.
+   339→   339→  while (uuidPool.length > 0) {
+   340→   340→    const candidate = uuidPool.shift()!
+   341→   341→    if (candidate.remaining > 0) return candidate
+   342→   342→  }
+   343→   343→
+   344→   344→  // 2. Honor cooldown to avoid IP rate-limiting.
+   345→   345→  const now = Date.now()
+   346→   346→  const elapsed = now - lastMintAt
+   347→   347→  if (elapsed < MINT_COOLDOWN_MS) {
+   348→   348→    await new Promise((r) => setTimeout(r, MINT_COOLDOWN_MS - elapsed))
+   349→   349→  }
+   350→   350→  lastMintAt = Date.now()
+   351→   351→
+   352→   352→  // 3. Single-flight: if another caller is already minting, wait for it.
+   353→   353→  if (inflightMint) {
+   354→   354→    const shared = await inflightMint
+   355→   355→    if (shared && shared.remaining > 0) return shared
+   356→   356→  }
+   357→   357→
+   358→   358→  // 4. Mint a fresh UUID.
+   359→   359→  inflightMint = mintFreshUuid()
+   360→   360→  const info = await inflightMint
+   361→   361→  inflightMint = null
+   362→   362→  return info
+   363→   363→}
+   364→   364→
+   365→   365→/**
+   366→   366→ * Top-up the UUID pool in the background (best-effort, non-blocking).
+   367→   367→ * Called after a successful detail fetch to keep the pool warm.
+   368→   368→ */
+   369→   369→function topUpPoolInBackground() {
+   370→   370→  if (uuidPool.length >= POOL_TARGET_SIZE) return
+   371→   371→  // Fire-and-forget; errors are swallowed.
+   372→   372→  ;(async () => {
+   373→   373→    while (uuidPool.length < POOL_TARGET_SIZE) {
+   374→   374→      const now = Date.now()
+   375→   375→      const elapsed = now - lastMintAt
+   376→   376→      if (elapsed < MINT_COOLDOWN_MS) {
+   377→   377→        await new Promise((r) => setTimeout(r, MINT_COOLDOWN_MS - elapsed))
+   378→   378→      }
+   379→   379→      lastMintAt = Date.now()
+   380→   380→      const info = await mintFreshUuid()
+   381→   381→      if (!info) break // rate-limited or error — stop trying
+   382→   382→      uuidPool.push(info)
+   383→   383→    }
+   384→   384→  })().catch(() => {})
+   385→   385→}
+   386→   386→
+   387→   387→/**
+   388→   388→ * Refresh quota when a detail fetch hits QUOTA_EXCEEDED.
+   389→   389→ * Returns a fresh visitor with quota, or null if the IP is rate-limited
+   390→   390→ * (in which case the caller should surface a "try VPN" message).
+   391→   391→ */
+   392→   392→async function refreshVisitorQuota(): Promise<VisitorInfo | null> {
+   393→   393→  return getUsableUuid()
+   394→   394→}
+   395→   395→
+   396→   396→// ---------------------------------------------------------------------------
+   397→   397→// Cache helpers — thin wrappers around the in-memory cache module.
+   398→   398→// Kept as function names (getCached/setCached) so the rest of the file
+   399→   399→// doesn't need to change.
+   400→   400→// ---------------------------------------------------------------------------
+   401→   401→
+   402→   402→async function getCached<T>(key: string): Promise<T | null> {
+   403→   403→  return getCache<T>(key)
+   404→   404→}
+   405→   405→
+   406→   406→async function setCached<T>(key: string, value: T): Promise<void> {
+   407→   407→  await setCache(key, value)
+   408→   408→}
+   409→   409→
+   410→   410→// ---------------------------------------------------------------------------
+   411→   411→// Public API
+   412→   412→// ---------------------------------------------------------------------------
+   413→   413→
+   414→   414→/**
+   415→   415→ * Search cinemm.com for movies or series.
+   416→   416→ * Not quota-limited — safe to call freely.
+   417→   417→ */
+   418→   418→export async function searchCinemm(
+   419→   419→  query: string,
+   420→   420→  type: MediaType,
+   421→   421→  opts: { useCache?: boolean } = {},
+   422→   422→): Promise<{ items: CinemmSearchItem[]; cached: boolean }> {
+   423→   423→  const key = `search:${query.toLowerCase()}:${type}`
+   424→   424→  if (opts.useCache !== false) {
+   425→   425→    const cached = await getCached<CinemmSearchItem[]>(key)
+   426→   426→    if (cached && cached.length > 0) return { items: cached, cached: true }
+   427→   427→  }
+   428→   428→
+   429→   429→  const { lines } = await callAction(ACTIONS.search, [query, type])
+   430→   430→  const raw = lines.get('1')
+   431→   431→  let items: CinemmSearchItem[] = []
+   432→   432→  if (raw) {
+   433→   433→    try {
+   434→   434→      // New format (2026-07-10+): { ok: true, results: [...] }
+   435→   435→      // Old format: array directly
+   436→   436→      const parsed = JSON.parse(raw) as
+   437→   437→        | CinemmSearchItem[]
+   438→   438→        | { ok: boolean; results: CinemmSearchItem[] }
+   439→   439→      const rawItems = Array.isArray(parsed) ? parsed : (parsed.results ?? [])
+   440→   440→      items = rawItems.map((it) => ({
+   441→   441→        ...it,
+   442→   442→        tmdbId: it.tmdbId === '$undefined' ? null : it.tmdbId,
+   443→   443→        imdbId: it.imdbId === '$undefined' ? null : it.imdbId,
+   444→   444→        overview: it.overview === '$undefined' ? null : it.overview,
+   445→   445→      }))
+   446→   446→    } catch {
+   447→   447→      items = []
+   448→   448→    }
+   449→   449→  }
+   450→   450→  // Only cache non-empty results to avoid caching transient failures
+   451→   451→  if (items.length > 0) await setCached(key, items)
+   452→   452→  return { items, cached: false }
+   453→   453→}
+   454→   454→
+   455→   455→/**
+   456→   456→ * Parse the RSC response from getMovieServersAction into a CinemmMovieDetails.
+   457→   457→ * Shared between the user-UUID path and the auto-refresh path.
+   458→   458→ *
+   459→   459→ * New format (2026-07-10+):
+   460→   460→ *   - JSON return value on line "1:" (glued to end of overview text):
+   461→   461→ *     { ok: true, servers: [...], overview: "$2" }
+   462→   462→ *   - Overview text chunk on line "2:" (was line "10:" before)
+   463→   463→ *   - No more remaining/error/quota fields (UUID system removed)
+   464→   464→ *
+   465→   465→ * Old format (pre-2026-07-10):
+   466→   466→ *   - JSON return value on line "1:":
+   467→   467→ *     { servers: [...], remaining: N, error: "...", overview: "$<refId>" }
+   468→   468→ *   - Overview text chunk on line "10:"
+   469→   469→ */
+   470→   470→function parseMovieDetailsResponse(
+   471→   471→  lines: Map<string, string>,
+   472→   472→  ctx: { id: number; source: string; name?: string; year?: string; poster?: string },
+   473→   473→): CinemmMovieDetails {
+   474→   474→  let raw = lines.get('1')
+   475→   475→  let servers: CinemmServer[] = []
+   476→   476→  let remaining = 0
+   477→   477→  let error: string | null = null
+   478→   478→  let overview = ''
+   479→   479→
+   480→   480→  // Extract overview text. In the new format the overview is on line "2:"
+   481→   481→  // (a T-prefixed text chunk). In the old format it was on line "10:" and
+   482→   482→  // referenced via "$10" in the JSON. We check both.
+   483→   483→  const overviewCandidates = [lines.get('2'), lines.get('10')].filter(
+   484→   484→    (s): s is string => !!s && s.length > 0,
+   485→   485→  )
+   486→   486→  for (const candidate of overviewCandidates) {
+   487→   487→    let text = candidate
+   488→   488→    const tMatch = text.match(/^T[0-9a-f]+,(.*)$/s)
+   489→   489→    if (tMatch) text = tMatch[1]
+   490→   490→    // If the candidate contains "Translated by" (the usual end marker for
+   491→   491→    // cinemm.com overviews) or just has substantial content, use it.
+   492→   492→    if (text.length > 50) {
+   493→   493→      overview = text
+   494→   494→      break
+   495→   495→    }
+   496→   496→  }
+   497→   497→
+   498→   498→  // In the new format, the JSON return value is glued to the end of the
+   499→   499→  // overview text (line "2:"). We need to split it out.
+   500→   500→  // Pattern: ...overview text...1:{"ok":true,...}
+   501→   501→  // We search backwards from the end for "1:{" and try to parse what follows
+   502→   502→  // as JSON. We keep searching backwards until we find a valid JSON object.
+   503→   503→  if (!raw && overview) {
+   504→   504→    let searchFrom = overview.length
+   505→   505→    while (searchFrom > 0) {
+   506→   506→      const markerPos = overview.lastIndexOf('1:{', searchFrom)
+   507→   507→      if (markerPos <= 0) break
+   508→   508→      const afterMarker = overview.substring(markerPos + 2) // skip "1:"
+   509→   509→      if (afterMarker.endsWith('}')) {
+   510→   510→        try {
+   511→   511→          JSON.parse(afterMarker)
+   512→   512→          // Valid JSON found — this is the glued return value.
+   513→   513→          raw = afterMarker
+   514→   514→          overview = overview.substring(0, markerPos)
+   515→   515→          lines.set('1', raw)
+   516→   516→          break
+   517→   517→        } catch {
+   518→   518→          // Not valid JSON, keep searching backwards.
+   519→   519→        }
+   520→   520→      }
+   521→   521→      searchFrom = markerPos - 1
+   522→   522→    }
+   523→   523→  }
+   524→   524→
+   525→   525→  if (raw) {
+   526→   526→    try {
+   527→   527→      const parsed = JSON.parse(raw) as {
+   528→   528→        ok?: boolean
+   529→   529→        message?: string
+   530→   530→        servers?: CinemmServer[]
+   531→   531→        remaining?: number
+   532→   532→        error?: string
+   533→   533→        overview?: string
+   534→   534→      }
+   535→   535→      // Check for rate-limit response: { ok: false, message: "Too many requests..." }
+   536→   536→      if (parsed.ok === false && parsed.message) {
+   537→   537→        error = 'RATE_LIMITED'
+   538→   538→      }
+   539→   539→      servers = (parsed.servers ?? []).map((s) => ({
+   540→   540→        ...s,
+   541→   541→        size: s.size ?? 'N/A',
+   542→   542→      }))
+   543→   543→      remaining = parsed.remaining ?? 0
+   544→   544→      // Only overwrite error if we haven't already set RATE_LIMITED
+   545→   545→      if (!error) error = parsed.error ?? null
+   546→   546→      // If the JSON has an overview reference (e.g. "$2"), resolve it.
+   547→   547→      const overviewRef = parsed.overview
+   548→   548→      if (typeof overviewRef === 'string' && overviewRef.startsWith('$')) {
+   549→   549→        const refText = lines.get(overviewRef.substring(1)) ?? ''
+   550→   550→        const tMatch = refText.match(/^T[0-9a-f]+,(.*)$/s)
+   551→   551→        if (tMatch) {
+   552→   552→          // The overview text chunk may also have the glued JSON at the end.
+   553→   553→          // Strip it.
+   554→   554→          let cleaned = tMatch[1]
+   555→   555→          const gluedMarker = cleaned.lastIndexOf('1:{')
+   556→   556→          if (gluedMarker > 0) {
+   557→   557→            const afterGlued = cleaned.substring(gluedMarker + 2)
+   558→   558→            if (afterGlued.endsWith('}')) {
+   559→   559→              try {
+   560→   560→                JSON.parse(afterGlued)
+   561→   561→                cleaned = cleaned.substring(0, gluedMarker)
+   562→   562→              } catch {
+   563→   563→                // leave as is
+   564→   564→              }
+   565→   565→            }
+   566→   566→          }
+   567→   567→          overview = cleaned
+   568→   568→        } else {
+   569→   569→          overview = refText
+   570→   570→        }
+   571→   571→      } else if (typeof overviewRef === 'string' && overviewRef !== '$undefined') {
+   572→   572→        overview = overviewRef
+   573→   573→      }
+   574→   574→    } catch (e) {
+   575→   575→      console.error('Failed to parse movie details JSON:', e)
+   576→   576→      error = 'PARSE_ERROR'
+   577→   577→    }
+   578→   578→  } else {
+   579→   579→    error = 'NO_RETURN_VALUE'
+   580→   580→  }
+   581→   581→
+   582→   582→  // If we got a valid response but no overview (cinemm.com's new format:
+   583→   583→  // overview: "$undefined"), don't treat it as an error — just return what
+   584→   584→  // we have. The UI will show "available via Telegram" if sourceAvailability
+   585→   585→  // is "available".
+   586→   586→  if (error === 'NO_RETURN_VALUE' && raw) {
+   587→   587→    error = null
+   588→   588→  }
+   589→   589→
+   590→   590→  return {
+   591→   591→    id: ctx.id,
+   592→   592→    name: ctx.name ?? '',
+   593→   593→    year: ctx.year ?? '',
+   594→   594→    poster: ctx.poster ?? '',
+   595→   595→    type: 'movie',
+   596→   596→    source: ctx.source,
+   597→   597→    overview,
+   598→   598→    servers,
+   599→   599→    remaining,
+   600→   600→    error,
+   601→   601→    fetchedAt: new Date().toISOString(),
+   602→   602→    sourceUrl: `${CINEMM_ORIGIN}/?search=${encodeURIComponent(ctx.name ?? '')}&type=movie`,
+   603→   603→  }
+   604→   604→}
+   605→   605→
+   606→   606→/**
+   607→   607→ * Fetch full details for a movie (servers + overview).
+   608→   608→ * Quota-limited — use caching to avoid burning quota.
+   609→   609→ *
+   610→   610→ * If the source returns QUOTA_EXCEEDED, we surface that to the caller as
+   611→   611→ * `error: "QUOTA_EXCEEDED"` and DO NOT cache the empty result, so the next
+   612→   612→ * call can retry.
+   613→   613→ */
+   614→   614→export async function getMovieDetails(
+   615→   615→  id: number,
+   616→   616→  source: string,
+   617→   617→  name?: string,
+   618→   618→  year?: string,
+   619→   619→  poster?: string,
+   620→   620→  opts: { useCache?: boolean; visitorUuid?: string | null } = {},
+   621→   621→): Promise<CinemmMovieDetails> {
+   622→   622→  const key = `details:movie:${id}:${source}`
+   623→   623→  if (opts.useCache !== false) {
+   624→   624→    const cached = await getCached<CinemmMovieDetails>(key)
+   625→   625→    if (cached && (cached.servers.length > 0 || cached.overview.length > 0)) {
+   626→   626→      return cached
+   627→   627→    }
+   628→   628→  }
+   629→   629→
+   630→   630→  // cinemm.com's new format: getMovieDetailsAction returns overview + flags,
+   631→   631→  // getMovieSourcesAction returns servers (but currently empty — links moved
+   632→   632→  // to Telegram). We call both and merge the results.
+   633→   633→  const retryDelays = [3000, 5000]
+   634→   634→  for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
+   635→   635→    // Call getMovieDetailsAction for overview
+   636→   636→    const { lines: detailsLines } = await callAction(ACTIONS.getMovieServers, [id, source])
+   637→   637→    const result = parseMovieDetailsResponse(detailsLines, { id, source, name, year, poster })
+   638→   638→    
+   639→   639→    // If rate-limited, wait and retry
+   640→   640→    if (result.error === 'RATE_LIMITED' && attempt < retryDelays.length) {
+   641→   641→      await new Promise((r) => setTimeout(r, retryDelays[attempt]))
+   642→   642→      continue
+   643→   643→    }
+   644→   644→    
+   645→   645→    // Also call getMovieSourcesAction for servers (currently returns empty,
+   646→   646→    // but may return servers in the future)
+   647→   647→    try {
+   648→   648→      const { lines: sourceLines } = await callAction(ACTIONS.getEpisodeServers, [id, source])
+   649→   649→      const sourceRaw = sourceLines.get('1')
+   650→   650→      if (sourceRaw) {
+   651→   651→        const sourceParsed = JSON.parse(sourceRaw) as { servers?: CinemmServer[] }
+   652→   652→        if (sourceParsed.servers && sourceParsed.servers.length > 0) {
+   653→   653→          result.servers = sourceParsed.servers.map((s) => ({
+   654→   654→            ...s,
+   655→   655→            size: s.size ?? 'N/A',
+   656→   656→          }))
+   657→   657→        }
+   658→   658→      }
+   659→   659→    } catch {
+   660→   660→      // Sources call failed — continue with details only
+   661→   661→    }
+   662→   662→
+   663→   663→    // If API returned no overview, try /api/scrape-movie (Playwright or HTTP fallback).
+   664→   664→    // cinemm.com's new API returns overview="$undefined" for movies.
+   665→   665→    if (!result.overview && !result.error) {
+   666→   666→      try {
+   667→   667→        const scrapeUrl = `/api/scrape-movie?id=${id}&type=movie&source=${source}&name=${encodeURIComponent(name ?? '')}&year=${encodeURIComponent(year ?? '')}&poster=${encodeURIComponent(poster ?? '')}`
+   668→   668→        const scrapeRes = await fetch(scrapeUrl)
+   669→   669→        if (scrapeRes.ok) {
+   670→   670→          const scrapeData = await scrapeRes.json() as {
+   671→   671→            overview?: string
+   672→   672→            telegramLink?: string | null
+   673→   673→            streamUrls?: string[]
+   674→   674→            method?: string
+   675→   675→          }
+   676→   676→          if (scrapeData.overview && scrapeData.overview.length > 50) {
+   677→   677→            result.overview = scrapeData.overview
+   678→   678→          }
+   679→   679→        }
+   680→   680→      } catch {
+   681→   681→        // Scrape failed — continue with what we have
+   682→   682→      }
+   683→   683→    }
+   684→   684→
+   685→   685→    // Return what we have — UI shows movie info + Telegram button
+   686→   686→    if (!result.error) await setCached(key, result)
+   687→   687→    return result
+   688→   688→  }
+   689→   689→  // Fallback after all retries
+   690→   690→  return {
+   691→   691→    id,
+   692→   692→    name: name ?? '',
+   693→   693→    year: year ?? '',
+   694→   694→    poster: poster ?? '',
+   695→   695→    type: 'movie',
+   696→   696→    source,
+   697→   697→    overview: '',
+   698→   698→    servers: [],
+   699→   699→    remaining: 0,
+   700→   700→    error: 'RATE_LIMITED',
+   701→   701→    fetchedAt: new Date().toISOString(),
+   702→   702→    sourceUrl: `${CINEMM_ORIGIN}/?search=${encodeURIComponent(name ?? '')}&type=movie`,
+   703→   703→  }
+   704→   704→}
+   705→   705→
+   706→   706→/**
+   707→   707→ * Fetch full details for a series (overview with embedded seasons/episodes).
+   708→   708→ * Quota-limited — use caching to avoid burning quota.
+   709→   709→ */
+   710→   710→export async function getSeriesDetails(
+   711→   711→  id: number,
+   712→   712→  source: string,
+   713→   713→  name?: string,
+   714→   714→  year?: string,
+   715→   715→  poster?: string,
+   716→   716→  opts: { useCache?: boolean; visitorUuid?: string | null } = {},
+   717→   717→): Promise<CinemmSeriesDetails> {
+   718→   718→  const key = `details:series:${id}:${source}`
+   719→   719→  if (opts.useCache !== false) {
+   720→   720→    const cached = await getCached<CinemmSeriesDetails>(key)
+   721→   721→    if (cached && cached.overview.length > 0) return cached
+   722→   722→  }
+   723→   723→
+   724→   724→  // Fetch with retry on rate-limit. On RATE_LIMITED, wait 3s then 5s and retry.
+   725→   725→  const retryDelays = [3000, 5000]
+   726→   726→  for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
+   727→   727→    const { lines } = await callAction(ACTIONS.getSeriesDetails, [id, source])
+   728→   728→
+   729→   729→    // Check for rate-limit response first
+   730→   730→    const raw1 = lines.get('1') ?? ''
+   731→   731→    if (raw1) {
+   732→   732→      try {
+   733→   733→        const parsed = JSON.parse(raw1) as { ok?: boolean; message?: string }
+   734→   734→        if (parsed.ok === false && parsed.message && attempt < retryDelays.length) {
+   735→   735→          await new Promise((r) => setTimeout(r, retryDelays[attempt]))
+   736→   736→          continue
+   737→   737→        }
+   738→   738→      } catch {
+   739→   739→        // Not a rate-limit response, continue parsing
+   740→   740→      }
+   741→   741→    }
+   742→   742→
+   743→   743→    // Extract overview from line "2:" (new format) or line "10:" (old format).
+   744→   744→    let overview = lines.get('2') ?? lines.get('10') ?? ''
+   745→   745→    const tMatch = overview.match(/^T[0-9a-f]+,(.*)$/s)
+   746→   746→    if (tMatch) overview = tMatch[1]
+   747→   747→
+   748→   748→    // Parse seasons from line "1:"
+   749→   749→    let seasonsJson = raw1
+   750→   750→    let seasons: CinemmSeason[] = []
+   751→   751→    if (seasonsJson) {
+   752→   752→      try {
+   753→   753→        const parsed = JSON.parse(seasonsJson) as { ok?: boolean; seasons?: CinemmSeason[] }
+   754→   754→        seasons = parsed.seasons ?? []
+   755→   755→      } catch (e) {
+   756→   756→        console.error('Failed to parse seasons JSON:', e)
+   757→   757→      }
+   758→   758→    }
+   759→   759→
+   760→   760→    const result = parseSeriesDetailsResponse(lines, { id, source, name, year, poster }, overview, seasons)
+   761→   761→
+   762→   762→    // If we got real content, cache and return
+   763→   763→    if (result.overview || result.seasons.length > 0) {
+   764→   764→      if (!result.error) await setCached(key, result)
+   765→   765→      return result
+   766→   766→    }
+   767→   767→
+   768→   768→    // If rate-limited, wait and retry
+   769→   769→    if (result.error === "RATE_LIMITED" && attempt < retryDelays.length) {
+   770→   770→      await new Promise((r) => setTimeout(r, 2000))
+   771→   771→      continue
+   772→   772→    }
+   773→   773→
+   774→   774→    // Other errors — return as-is
+   775→   775→    return result
+   776→   776→  }
+   777→   777→
+   778→   778→  // Fallback (shouldn't reach here)
+   779→   779→  return {
+   780→   780→    id,
+   781→   781→    name: name ?? '',
+   782→   782→    year: year ?? '',
+   783→   783→    poster: poster ?? '',
+   784→   784→    type: 'series',
+   785→   785→    source,
+   786→   786→    overview: '',
+   787→   787→    seasons: [],
+   788→   788→    remaining: 0,
+   789→   789→    error: 'RATE_LIMITED',
+   790→   790→    fetchedAt: new Date().toISOString(),
+   791→   791→    sourceUrl: `${CINEMM_ORIGIN}/?search=${encodeURIComponent(name ?? '')}&type=series`,
+   792→   792→  }
+   793→   793→}
+   794→   794→
+   795→   795→/**
+   796→   796→ * Parse the RSC response from getSeriesDetailsAction into a CinemmSeriesDetails.
+   797→   797→ * Shared between the user-UUID path and the auto-refresh path.
+   798→   798→ */
+   799→   799→function parseSeriesDetailsResponse(
+   800→   800→  lines: Map<string, string>,
+   801→   801→  ctx: { id: number; source: string; name?: string; year?: string; poster?: string },
+   802→   802→  overview = '',
+   803→   803→  seasons: CinemmSeason[] = [],
+   804→   804→): CinemmSeriesDetails {
+   805→   805→  // Look for remaining quota info on line "6:" (initialUser payload)
+   806→   806→  let remaining = 0
+   807→   807→  const userPayload = lines.get('6')
+   808→   808→  if (userPayload) {
+   809→   809→    const m = userPayload.match(/"remaining"\s*:\s*(\d+)/)
+   810→   810→    if (m) remaining = parseInt(m[1], 10)
+   811→   811→  }
+   812→   812→
+   813→   813→  const error = overview || seasons.length > 0 ? null : 'NO_OVERVIEW'
+   814→   814→
+   815→   815→  return {
+   816→   816→    id: ctx.id,
+   817→   817→    name: ctx.name ?? '',
+   818→   818→    year: ctx.year ?? '',
+   819→   819→    poster: ctx.poster ?? '',
+   820→   820→    type: 'series',
+   821→   821→    source: ctx.source,
+   822→   822→    overview,
+   823→   823→    seasons,
+   824→   824→    remaining,
+   825→   825→    error,
+   826→   826→    fetchedAt: new Date().toISOString(),
+   827→   827→    sourceUrl: `${CINEMM_ORIGIN}/?search=${encodeURIComponent(ctx.name ?? '')}&type=series`,
+   828→   828→  }
+   829→   829→}
+   830→   830→
+   831→   831→/**
+   832→   832→ * Fetch streaming/download servers for a single episode.
+   833→   833→ * Args: (episodeId, source). Quota-limited — uses caching.
+   834→   834→ */
+   835→   835→export async function getEpisodeServers(
+   836→   836→  episodeId: number,
+   837→   837→  source: string,
+   838→   838→  opts: { useCache?: boolean; visitorUuid?: string | null } = {},
+   839→   839→): Promise<CinemmEpisodeDetails> {
+   840→   840→  const key = `episode:${episodeId}:${source}`
+   841→   841→  if (opts.useCache !== false) {
+   842→   842→    const cached = await getCached<CinemmEpisodeDetails>(key)
+   843→   843→    if (cached && cached.servers.length > 0) return cached
+   844→   844→  }
+   845→   845→
+   846→   846→  // Fetch with retry on rate-limit. On RATE_LIMITED, wait 2s then 4s and retry.
+   847→   847→  const epRetryDelays = [2000, 4000]
+   848→   848→  for (let attempt = 0; attempt <= epRetryDelays.length; attempt++) {
+   849→   849→    const { lines } = await callAction(ACTIONS.getEpisodeServers, [episodeId, source])
+   850→   850→    const result = parseEpisodeServersResponse(lines, episodeId)
+   851→   851→    // If we got servers, cache and return
+   852→   852→    if (result.servers.length > 0) {
+   853→   853→      if (!result.error) await setCached(key, result)
+   854→   854→      return result
+   855→   855→    }
+   856→   856→    // If rate-limited, wait and retry
+   857→   857→    if (result.error === 'RATE_LIMITED' && attempt < epRetryDelays.length) {
+   858→   858→      await new Promise((r) => setTimeout(r, epRetryDelays[attempt]))
+   859→   859→      continue
+   860→   860→    }
+   861→   861→    // Other errors — return as-is
+   862→   862→    return result
+   863→   863→  }
+   864→   864→  // Fallback
+   865→   865→  return {
+   866→   866→    episodeId,
+   867→   867→    servers: [],
+   868→   868→    remaining: 0,
+   869→   869→    error: 'RATE_LIMITED',
+   870→   870→    fetchedAt: new Date().toISOString(),
+   871→   871→  }
+   872→   872→}
+   873→   873→
+   874→   874→/** Parse the RSC response from getEpisodeServersAction into CinemmEpisodeDetails. */
+   875→   875→function parseEpisodeServersResponse(
+   876→   876→  lines: Map<string, string>,
+   877→   877→  episodeId: number,
+   878→   878→): CinemmEpisodeDetails {
+   879→   879→  const raw = lines.get('1')
+   880→   880→  let servers: CinemmServer[] = []
+   881→   881→  let remaining = 0
+   882→   882→  let error: string | null = null
+   883→   883→  if (raw) {
+   884→   884→    try {
+   885→   885→      const parsed = JSON.parse(raw) as {
+   886→   886→        ok?: boolean
+   887→   887→        message?: string
+   888→   888→        servers?: CinemmServer[]
+   889→   889→        remaining?: number
+   890→   890→        error?: string
+   891→   891→      }
+   892→   892→      // Check for rate-limit response: { ok: false, message: "Too many requests..." }
+   893→   893→      if (parsed.ok === false && parsed.message) {
+   894→   894→        error = 'RATE_LIMITED'
+   895→   895→      }
+   896→   896→      servers = (parsed.servers ?? []).map((s) => ({
+   897→   897→        ...s,
+   898→   898→        size: s.size ?? 'N/A',
+   899→   899→      }))
+   900→   900→      remaining = parsed.remaining ?? 0
+   901→   901→      if (!error) error = parsed.error ?? null
+   902→   902→    } catch (e) {
+   903→   903→      console.error('Failed to parse episode servers JSON:', e)
+   904→   904→      error = 'PARSE_ERROR'
+   905→   905→    }
+   906→   906→  } else {
+   907→   907→    error = 'NO_RETURN_VALUE'
+   908→   908→  }
+   909→   909→  return {
+   910→   910→    episodeId,
+   911→   911→    servers,
+   912→   912→    remaining,
+   913→   913→    error,
+   914→   914→    fetchedAt: new Date().toISOString(),
+   915→   915→  }
+   916→   916→}
+   917→   917→
+   918→   918→/**
+   919→   919→ * Unified details fetcher that picks the right action based on type.
+   920→   920→ */
+   921→   921→export async function getDetails(
+   922→   922→  item: Pick<CinemmSearchItem, 'id' | 'type' | 'source' | 'name' | 'year' | 'poster'>,
+   923→   923→  opts?: { useCache?: boolean; visitorUuid?: string | null },
+   924→   924→): Promise<CinemmDetails> {
+   925→   925→  if (item.type === 'movie') {
+   926→   926→    return getMovieDetails(item.id, item.source, item.name, item.year, item.poster, opts)
+   927→   927→  }
+   928→   928→  return getSeriesDetails(item.id, item.source, item.name, item.year, item.poster, opts)
+   929→   929→}
+   930→   930→
+   931→   931→// ---------------------------------------------------------------------------
+   932→   932→// TMDB ID lookup (uses the public TMDB API; cached in SQLite)
+   933→   933→// ---------------------------------------------------------------------------
+   934→   934→
+   935→   935→/**
+   936→   936→ * Look up the real TMDB movie/series ID by name + year. The result is cached
+   937→   937→ * in SQLite so subsequent calls for the same name+year+type are free.
+   938→   938→ *
+   939→   939→ * Args:
+   940→   940→ *   - name: e.g. "Inception", "Breaking Bad"
+   941→   941→ *   - year: e.g. "2010", "2008" (extracted from cinemm.com's year field)
+   942→   942→ *   - type: 'movie' or 'series'
+   943→   943→ *   - apiKey: TMDB v3 API key
+   944→   944→ *
+   945→   945→ * Returns the TMDB ID as a number, or null if not found / on error.
+   946→   946→ */
+   947→   947→export async function lookupTmdbId(
+   948→   948→  name: string,
+   949→   949→  year: string,
+   950→   950→  type: MediaType,
+   951→   951→  apiKey: string,
+   952→   952→  opts: { useCache?: boolean } = {},
+   953→   953→): Promise<{ tmdbId: number | null; cached: boolean }> {
+   954→   954→  if (!name || !apiKey) return { tmdbId: null, cached: false }
+   955→   955→  // Extract first 4-digit year from the year string (handles "2010", "2008-2013", etc.)
+   956→   956→  const yearMatch = year.match(/\d{4}/)
+   957→   957→  const yearNum = yearMatch ? parseInt(yearMatch[0], 10) : null
+   958→   958→
+   959→   959→  const cacheKey = `tmdb:${type}:${name.toLowerCase()}:${yearNum ?? 'any'}`
+   960→   960→  if (opts.useCache !== false) {
+   961→   961→    const cached = await getCached<{ tmdbId: number | null }>(cacheKey)
+   962→   962→    if (cached) return { tmdbId: cached.tmdbId, cached: true }
+   963→   963→  }
+   964→   964→
+   965→   965→  const endpoint = type === 'movie' ? 'search/movie' : 'search/tv'
+   966→   966→  const url = new URL(`https://api.themoviedb.org/3/${endpoint}`)
+   967→   967→  url.searchParams.set('api_key', apiKey)
+   968→   968→  url.searchParams.set('query', name)
+   969→   969→  url.searchParams.set('include_adult', 'false')
+   970→   970→  if (yearNum) {
+   971→   971→    url.searchParams.set(type === 'movie' ? 'year' : 'first_air_date_year', String(yearNum))
+   972→   972→  }
+   973→   973→
+   974→   974→  try {
+   975→   975→    const res = await fetch(url.toString(), {
+   976→   976→      headers: { Accept: 'application/json' },
+   977→   977→    })
+   978→   978→    if (!res.ok) {
+   979→   979→      console.error(`TMDB API returned HTTP ${res.status}`)
+   980→   980→      return { tmdbId: null, cached: false }
+   981→   981→    }
+   982→   982→    const data = (await res.json()) as {
+   983→   983→      results?: Array<{ id: number; title?: string; name?: string }>
+   984→   984→    }
+   985→   985→    const results = data.results ?? []
+   986→   986→    if (results.length === 0) {
+   987→   987→      // Cache negative result too (avoid re-querying for known-misses)
+   988→   988→      await setCached(cacheKey, { tmdbId: null })
+   989→   989→      return { tmdbId: null, cached: false }
+   990→   990→    }
+   991→   991→    // Pick the first result (TMDB's search is already ranked by relevance).
+   992→   992→    const tmdbId = results[0].id
+   993→   993→    await setCached(cacheKey, { tmdbId })
+   994→   994→    return { tmdbId, cached: false }
+   995→   995→  } catch (e) {
+   996→   996→    console.error('TMDB lookup failed:', e)
+   997→   997→    return { tmdbId: null, cached: false }
+   998→   998→  }
+   999→   999→}
+  1000→  1000→
