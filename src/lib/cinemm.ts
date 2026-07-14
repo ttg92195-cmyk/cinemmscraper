@@ -635,13 +635,19 @@ export async function getMovieDetails(
     }
   }
 
-  // cinemm.com's new format: getMovieDetailsAction returns overview + flags,
-  // getMovieSourcesAction returns servers (but currently empty — links moved
-  // to Telegram). We call both and merge the results.
+  // cinemm.com's new format (2026-07-14+):
+  //   getMovieDetailsAction(id, fetchOverview: boolean) — returns:
+  //     when fetchOverview=true:  RSC with overview text on line "2:" (T chunk)
+  //     when fetchOverview=false: {"ok":true,"overview":"$undefined",...} on line "1:"
+  //   getMovieSourcesAction(id, source) — returns { ok, access, servers }
+  //     (currently access="telegram" with empty servers)
+  //
+  // IMPORTANT: the second arg is a BOOLEAN, not a source string! Discovered by
+  // reading the client bundle: `let t = await k(e.id, s);` where `s = !overview`.
   const retryDelays = [3000, 5000]
   for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
-    // Call getMovieDetailsAction for overview
-    const { lines: detailsLines } = await callAction(ACTIONS.getMovieServers, [id, source])
+    // Call getMovieDetailsAction with fetchOverview=true to get the overview
+    const { lines: detailsLines } = await callAction(ACTIONS.getMovieServers, [id, true])
     const result = parseMovieDetailsResponse(detailsLines, { id, source, name, year, poster })
     
     // If rate-limited, wait and retry
@@ -719,10 +725,12 @@ export async function getSeriesDetails(
     if (cached && cached.overview.length > 0) return cached
   }
 
-  // Fetch with retry on rate-limit. On RATE_LIMITED, wait 3s then 5s and retry.
+  // cinemm.com's new format (2026-07-14+):
+  //   getSeriesDetailsAction(id, fetchOverview: boolean) — same pattern as movies
+  //   when fetchOverview=true, overview text comes back on line "2:" (T chunk)
   const retryDelays = [3000, 5000]
   for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
-    const { lines } = await callAction(ACTIONS.getSeriesDetails, [id, source])
+    const { lines } = await callAction(ACTIONS.getSeriesDetails, [id, true])
 
     // Check for rate-limit response first
     const raw1 = lines.get('1') ?? ''
