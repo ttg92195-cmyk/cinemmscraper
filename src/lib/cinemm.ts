@@ -661,27 +661,13 @@ export async function getMovieDetails(
       // Sources call failed — continue with details only
     }
 
-    // If API returned no overview, try /api/scrape-movie (Playwright or HTTP fallback).
-    // cinemm.com's new API returns overview="$undefined" for movies.
-    if (!result.overview && !result.error) {
-      try {
-        const scrapeUrl = `/api/scrape-movie?id=${id}&type=movie&source=${source}&name=${encodeURIComponent(name ?? '')}&year=${encodeURIComponent(year ?? '')}&poster=${encodeURIComponent(poster ?? '')}`
-        const scrapeRes = await fetch(scrapeUrl)
-        if (scrapeRes.ok) {
-          const scrapeData = await scrapeRes.json() as {
-            overview?: string
-            telegramLink?: string | null
-            streamUrls?: string[]
-            method?: string
-          }
-          if (scrapeData.overview && scrapeData.overview.length > 50) {
-            result.overview = scrapeData.overview
-          }
-        }
-      } catch {
-        // Scrape failed — continue with what we have
-      }
-    }
+    // If API returned no overview, that's expected — cinemm.com's new API
+    // returns overview="$undefined" for movies. The /api/scrape-movie route
+    // will fetch it via ScraperAPI/Playwright fallback as a separate call.
+    // (We used to call /api/scrape-movie here directly, but that created a
+    // circular dependency when /api/scrape-movie itself calls getDetails().
+    // Now the UI is responsible for falling back to /api/scrape-movie when
+    // details.overview is empty.)
 
     // Return what we have — UI shows movie info + Telegram button
     if (!result.error) await setCached(key, result)

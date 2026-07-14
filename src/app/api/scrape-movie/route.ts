@@ -1,9 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import * as cheerio from 'cheerio'
-import { searchCinemm, type MediaType } from '@/lib/cinemm'
+import {
+  searchCinemm,
+  getDetails,
+  type MediaType,
+  type CinemmDetails,
+} from '@/lib/cinemm'
 
 export const runtime = 'nodejs'
-export const maxDuration = 25
+export const maxDuration = 60
 
 /**
  * GET /api/scrape-movie?id=<num>&type=<movie|series>&source=<CM>&name=<...>
@@ -13,9 +18,12 @@ export const maxDuration = 25
  * Strategy chain (each step falls through to the next on failure):
  *   0. Resolve poster — if `poster` query param is missing, search cinemm.com
  *      and look up the matching item by id to grab its poster URL.
- *   1. Playwright (local dev / full Docker image) — renders SPA, clicks result, reads detail page
- *   2. ScraperAPI (render=true) — server-side render via ScraperAPI service
- *   3. Fallback — just construct Telegram link from ID
+ *   1. getDetails() — call cinemm.com's Server Actions directly (no browser)
+ *      to fetch overview + servers. Works on Railway because it's just HTTP.
+ *   2. Playwright (local dev / full Docker image) — renders SPA, clicks result
+ *      Used as a last-resort when Server Actions return empty overview.
+ *   3. ScraperAPI (render=true) — server-side render via ScraperAPI service
+ *   4. Fallback — just construct Telegram link from ID
  *
  * IMPORTANT: On Railway/Vercel standalone builds, Playwright's browsers.json
  * is missing from the standalone bundle, so import('playwright') will throw.
@@ -29,6 +37,7 @@ export async function GET(req: NextRequest) {
   const year = searchParams.get('year') ?? ''
   let poster = searchParams.get('poster') ?? ''
   const source = searchParams.get('source') ?? 'CM'
+  const visitorUuid = searchParams.get('uuid') || null
 
   if (!id) {
     return NextResponse.json({ error: 'Missing "id"' }, { status: 400 })
@@ -38,13 +47,17 @@ export async function GET(req: NextRequest) {
   const telegramLink = `https://t.me/cinemmbot?start=w_${type === 'movie' ? 'm' : 's'}_${id}`
 
   // Track all attempts for the final response
-  const attempts: Array<{ method: string; ok: boolean; error?: string; overview?: string }> = []
+  const attempts: Array<{
+    method: string
+    ok: boolean
+    error?: string
+    overview?: string
+    servers?: number
+  }> = []
 
   // ============================================================
   // Step 0: Resolve poster URL if not supplied
   // ============================================================
-  // The poster is part of the search-result payload (not the detail payload),
-  // so callers normally pass it through. If missing, look it up ourselves.
   if (!poster && name) {
     try {
       const { items } = await searchCinemm(name, type as MediaType, { useCache: true })
@@ -69,12 +82,65 @@ export async function GET(req: NextRequest) {
       })
     }
   }
+
   // ============================================================
-  // Strategy 1: Playwright (local dev / full Docker image only)
+  // Step 1: getDetails() — cinemm.com Server Actions (HTTP only)
   // ============================================================
+  // This is the fastest path and works on Railway because it's plain HTTP.
+  // cinemm.com returns overview as RSC line "2:" (text chunk).
+  try {
+    const details: CinemmDetails = await getDetails(
+      { id: parseInt(id, 10), type: type as MediaType, source, name, year, poster },
+      { useCache: true, visitorUuid },
+    )
+
+    const overview = details.overview || ''
+    const servers = 'servers' in details ? details.servers : []
+    const hasContent = overview.length > 0 || servers.length > 0
+
+    attempts.push({
+      method: 'getDetails',
+      ok: hasContent,
+      overview: overview.slice(0, 100),
+      servers: servers.length,
+      error: hasContent ? undefined : (details.error ?? 'empty overview + servers'),
+    })
+
+    if (hasContent) {
+      // Found it! Return immediately.
+      return NextResponse.json({
+        id: parseInt(id, 10),
+        name,
+        year,
+        poster,
+        type,
+        source,
+        overview,
+        telegramLink,
+        streamUrls: servers.map((s) => s.url).filter(Boolean),
+        servers,
+        fetchedAt: new Date().toISOString(),
+        sourceUrl: searchUrl,
+        error: null,
+        method: 'getDetails',
+        attempts,
+        remaining: details.remaining,
+      })
+    }
+  } catch (e) {
+    attempts.push({
+      method: 'getDetails',
+      ok: false,
+      error: e instanceof Error ? e.message : 'getDetails failed',
+    })
+  }
+
+  // ============================================================
+  // Step 2: Playwright (local dev / full Docker image only)
+  // ============================================================
+  // On Railway standalone, this throws on import — caught and fall through.
   let browser: any = null
   try {
-    // Dynamic import — will throw on Railway standalone build (browsers.json missing)
     const pw = await import('playwright')
 
     browser = await pw.chromium.launch({
@@ -87,7 +153,6 @@ export async function GET(req: NextRequest) {
     await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 20000 })
     await page.waitForTimeout(3000)
 
-    // Click the first matching result
     const resultEl = page.locator(`text=${name}`).first()
     const resultCount = await resultEl.count()
     if (resultCount > 0) {
@@ -98,7 +163,6 @@ export async function GET(req: NextRequest) {
     const pageText = await page.evaluate(() => document.body.innerText)
     const overview = extractOverviewFromText(pageText)
 
-    // Look for an actual Telegram link in the rendered page
     const actualTelegramLink = await page
       .locator('a[href*="t.me"]')
       .first()
@@ -108,7 +172,7 @@ export async function GET(req: NextRequest) {
     await browser.close()
     browser = null
 
-    attempts.push({ method: 'playwright', ok: true, overview })
+    attempts.push({ method: 'playwright', ok: true, overview: overview.slice(0, 100) })
 
     return NextResponse.json({
       id: parseInt(id, 10),
@@ -135,7 +199,7 @@ export async function GET(req: NextRequest) {
   }
 
   // ============================================================
-  // Strategy 2: ScraperAPI (render=true) — works on Railway/Vercel
+  // Step 3: ScraperAPI (render=true) — works on Railway/Vercel
   // ============================================================
   const apiKey = process.env.SCRAPER_API_KEY
   if (apiKey) {
@@ -143,7 +207,7 @@ export async function GET(req: NextRequest) {
       const scraperUrl = `http://api.scraperapi.com?api_key=${apiKey}&url=${encodeURIComponent(searchUrl)}&render=true&country_code=us`
       const scrapeRes = await fetch(scraperUrl, {
         headers: { 'Accept': 'text/html' },
-        signal: AbortSignal.timeout(20000),
+        signal: AbortSignal.timeout(45000), // increased to 45s
       })
 
       if (scrapeRes.ok) {
@@ -158,7 +222,7 @@ export async function GET(req: NextRequest) {
         const extractedPoster =
           $('img[src*="image.tmdb.org"], img[src*="cinemm"], img[src*="poster"]').first().attr('src') || poster
 
-        attempts.push({ method: 'scraperapi', ok: true, overview })
+        attempts.push({ method: 'scraperapi', ok: true, overview: overview.slice(0, 100) })
 
         return NextResponse.json({
           id: parseInt(id, 10),
@@ -198,7 +262,7 @@ export async function GET(req: NextRequest) {
   }
 
   // ============================================================
-  // Strategy 3: Fallback — return just the Telegram link
+  // Step 4: Fallback — return just the Telegram link
   // ============================================================
   attempts.push({ method: 'fallback', ok: true })
 
