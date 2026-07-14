@@ -442,3 +442,22 @@ Stage Summary:
   - TELEGRAM_API_HASH=5b575a81ca360c0bb0bd98585c6afb6c
   - TELEGRAM_SESSION=<the_long_string>
   - TELEGRAM_BOT_USERNAME=cinemmbot
+
+---
+Task ID: ui-feature-clarification
+Agent: main (Super Z)
+Task: Bro ပြောထားတဲ့ UI feature တွေ မှတ်တမ်းတင်
+
+Work Log:
+- Bro က cinemm.com post ထဲက "Show Sources" button နှိပ်ရင်:
+  - Download Icon button နဲ့ Watch Icon button ဆိုပြီး ခလုတ်အသေးစား ၂ မျိုးပေါ်တယ်
+  - Watch Icon နှိပ်ရင်: VLC Player app ကို တိုက်ရိုက် ခေါ်ယူပြီး, URL နဲ့ video တိုက်ရိုက် VLC app ထဲမှာ ဖွင့်ပေးတယ်
+  - Download Icon နှိပ်ရင်: ပြင်ပ tab မသွားဘဲ, ချက်ချင်း download စတင်ပြီး အဲဒီနေရာမှာပဲ သိမ်းတယ်
+
+- ဒီ feature တွေက ကျွန်တော်တို့ UI ထဲမှာ ထည့်ပေးလို့ရတယ်:
+  1. "Watch in VLC" button — `vlc://` URL scheme ကို အသုံးပြုပြီး stream URL ကို VLC app ထဲ ပို့တယ်
+  2. "Download" button — HTML5 `<a download>` attribute နဲ့ browser ထဲမှာပဲ download လုပ်စေတယ် (ပြင်ပ tab မလုပ်ဘူး)
+
+Stage Summary:
+- Bro ပြောထားတဲ့အတိုင်း VLC integration + download တိုက်ရိုက် feature တွေ နောက်ပြီး ထည့်ပေးနိုင်တယ်။
+- အခု cinemm.com ပိတ်နေလို့ စောင့်နေရတယ်။ ပြန်ဖွင့်ရင် ဒီ feature တွေ ထည့်ပြီး test လုပ်မယ်။
