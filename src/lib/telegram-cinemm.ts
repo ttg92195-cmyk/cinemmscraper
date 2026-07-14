@@ -41,6 +41,18 @@ interface BotReply {
 
 /**
  * Connect to Telegram, send a deep-link to @cinemmbot, return the reply.
+ *
+ * Flow (discovered by reverse-engineering @cinemmbot):
+ *   1. Send "/start w_m_<id>" to @cinemmbot
+ *   2. Bot replies with movie/series info + a "Fetch Sources" inline button
+ *      (button data: "m:<id>" or "s:<id>")
+ *   3. Click the "Fetch Sources" button — bot EDITS its original reply message
+ *      to include stream URLs (NOT a new message!)
+ *   4. Extract URLs from the edited message:
+ *      - Button copyText fields (KeyboardButtonCopy) — the actual stream URLs
+ *      - Button URL fields (KeyboardButtonUrl) — alternative links
+ *      - Text URLs — fallback
+ *
  * Returns null if anything goes wrong (no session, network error, timeout).
  */
 export async function fetchStreamUrlsFromBot(
@@ -74,7 +86,7 @@ export async function fetchStreamUrlsFromBot(
     await new Promise((r) => setTimeout(r, TG_RATE_LIMIT_MS - sinceLast))
   }
 
-  // 4. Connect + send + receive + disconnect
+  // 4. Connect + send + click + read edited message + disconnect
   let client: TelegramClient | null = null
   try {
     client = new TelegramClient(
@@ -88,19 +100,19 @@ export async function fetchStreamUrlsFromBot(
       throw new Error('Failed to connect to Telegram')
     }
 
-    // Send the deep-link command to the bot
-    // /start w_m_6611 — same as clicking the deep link
+    // Resolve the bot entity
+    const entity = await client.getEntity(botUsername)
+
+    // Send "/start w_m_<id>" (or w_s_<id>")
     const startArg = deepLink.replace(/^.*start=/, '').replace(/\?.*$/, '')
     const command = `/start ${startArg}`.trim()
 
-    const entity = await client.getEntity(botUsername)
     lastBotMessageAt = Date.now()
     await client.sendMessage(entity, { message: command })
 
-    // Wait for the bot's reply — poll for new messages in the next 15s
-    const reply = await waitForBotReply(client, entity.id.toString(), botUsername)
-
-    if (!reply) {
+    // Wait for the bot's initial reply (with the "Fetch Sources" button)
+    const initialReply = await waitForBotReply(client, entity.id.toString(), botUsername)
+    if (!initialReply) {
       return {
         urls: [],
         raw: '',
@@ -109,10 +121,60 @@ export async function fetchStreamUrlsFromBot(
       }
     }
 
-    // 5. Extract URLs from text + buttons
-    const allUrls = [...new Set([...reply.urls, ...reply.buttonUrls])].filter(
-      (u) => u.startsWith('http://') || u.startsWith('https://'),
+    // If there are no buttons, the bot may have already returned the URLs
+    // (some movies don't have a separate Fetch Sources step)
+    if (!initialReply.replyMarkup || !('rows' in initialReply.replyMarkup)) {
+      const urls = extractUrlsFromMessage(initialReply)
+      if (urls.length > 0) await setCache(cacheKey, urls)
+      return { urls, raw: initialReply.text, cached: false }
+    }
+
+    // Find the "Fetch Sources" button (callback button)
+    let fetchButton: any = null
+    for (const row of initialReply.replyMarkup.rows) {
+      for (const btn of row.buttons) {
+        if (btn.className === 'KeyboardButtonCallback' && /fetch|sources?|get/i.test(btn.text)) {
+          fetchButton = btn
+          break
+        }
+      }
+      if (fetchButton) break
+    }
+
+    if (!fetchButton) {
+      // No fetch button — extract URLs from whatever we have
+      const urls = extractUrlsFromMessage(initialReply)
+      if (urls.length > 0) await setCache(cacheKey, urls)
+      return { urls, raw: initialReply.text, cached: false }
+    }
+
+    // Click the "Fetch Sources" button
+    const beforeClickId = initialReply.id
+    try {
+      await initialReply.click({ text: fetchButton.text })
+    } catch (e) {
+      // click() may throw even on success — we'll check for edited message below
+    }
+
+    // Wait for the bot to EDIT the original message with stream URLs
+    // (Bot doesn't send a new message — it edits the existing one)
+    const editedReply = await waitForEditedMessage(
+      client,
+      entity.id.toString(),
+      beforeClickId,
     )
+
+    if (!editedReply) {
+      return {
+        urls: [],
+        raw: initialReply.text,
+        cached: false,
+        error: 'Bot did not edit message with stream URLs after button click',
+      }
+    }
+
+    // 5. Extract URLs from the edited message (button copyText + URL + text)
+    const allUrls = extractUrlsFromMessage(editedReply)
 
     // 6. Cache for 7 days
     if (allUrls.length > 0) {
@@ -121,12 +183,11 @@ export async function fetchStreamUrlsFromBot(
 
     return {
       urls: allUrls,
-      raw: reply.text,
+      raw: editedReply.text,
       cached: false,
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown Telegram error'
-    // Detect session-revoked errors so the user knows to re-login
     if (msg.includes('AUTH_KEY_UNREGISTERED') || msg.includes('SESSION_REVOKED')) {
       return {
         urls: [],
@@ -135,7 +196,6 @@ export async function fetchStreamUrlsFromBot(
         error: 'Telegram session revoked — re-run scripts/telegram-login.mjs',
       }
     }
-    // Detect FloodWait — surface the wait time so the caller can retry later
     const floodMatch = msg.match(/A wait of (\d+) seconds is required/i)
     if (floodMatch) {
       return {
@@ -158,14 +218,53 @@ export async function fetchStreamUrlsFromBot(
 }
 
 /**
+ * Extract stream URLs from a Telegram message.
+ * URLs can be in:
+ *   1. KeyboardButtonCopy.copyText (button text contains "Tube 1 4K" etc.)
+ *   2. KeyboardButtonUrl.url (URL buttons)
+ *   3. Message text (regex https?://...)
+ */
+function extractUrlsFromMessage(msg: any): string[] {
+  const urls: string[] = []
+
+  // 1. Buttons
+  if (msg.replyMarkup && 'rows' in msg.replyMarkup) {
+    for (const row of msg.replyMarkup.rows) {
+      for (const btn of row.buttons) {
+        // KeyboardButtonCopy — has copyText (the actual URL)
+        if (btn.copyText && typeof btn.copyText === 'string') {
+          urls.push(btn.copyText)
+        }
+        // KeyboardButtonUrl — has url
+        if (btn.url && typeof btn.url === 'string') {
+          urls.push(btn.url)
+        }
+      }
+    }
+  }
+
+  // 2. Message text (regex https?://...)
+  if (msg.message) {
+    const textUrls = Array.from(String(msg.message).matchAll(/https?:\/\/[^\s<>"']+/g)).map((m: RegExpMatchArray) => m[0])
+    urls.push(...textUrls)
+  }
+
+  // Dedupe + filter valid URLs
+  return [...new Set(urls)].filter(
+    (u) => u.startsWith('http://') || u.startsWith('https://'),
+  )
+}
+
+/**
  * Poll for the bot's reply. Returns the first new message from the bot
- * within the timeout window.
+ * within the timeout window. Returns the full message object (not just text)
+ * so the caller can click buttons on it.
  */
 async function waitForBotReply(
   client: TelegramClient,
   botEntityId: string,
   botUsername: string,
-): Promise<BotReply | null> {
+): Promise<any | null> {
   const deadline = Date.now() + TG_REPLY_TIMEOUT_MS
   // Get current message count so we can detect the new one
   const messages = await client.getMessages(botEntityId, { limit: 1 })
@@ -186,22 +285,47 @@ async function waitForBotReply(
       return senderUsername === botUsername || sender.id?.toString() === botEntityId
     })
     if (botMsg) {
-      const text = botMsg.message ?? ''
-      // Extract URLs from text
-      const textUrls = Array.from(text.matchAll(/https?:\/\/[^\s<>"']+/g)).map((m) => m[0])
-      // Extract URLs from inline buttons
-      const buttonUrls: string[] = []
-      const replyMarkup = botMsg.replyMarkup
-      if (replyMarkup && 'rows' in replyMarkup) {
-        for (const row of replyMarkup.rows) {
-          for (const button of row.buttons) {
-            if ('url' in button && button.url) {
-              buttonUrls.push(button.url)
-            }
-          }
-        }
-      }
-      return { text, urls: textUrls, buttonUrls }
+      return botMsg
+    }
+  }
+  return null
+}
+
+/**
+ * Wait for a specific message to be edited. Polls the message by ID and
+ * checks if its editDate has changed (or if its content/buttons changed).
+ *
+ * @cinemmbot edits the original message (rather than sending a new one)
+ * after the user clicks "Fetch Sources". So we watch the original message.
+ */
+async function waitForEditedMessage(
+  client: TelegramClient,
+  botEntityId: string,
+  messageId: number,
+): Promise<any | null> {
+  const deadline = Date.now() + TG_REPLY_TIMEOUT_MS
+  // Capture the original editDate (if any)
+  const origMsgs = await client.getMessages(botEntityId, { ids: [messageId] })
+  const origEditDate = origMsgs?.[0]?.editDate ?? 0
+  const origButtonCount =
+    origMsgs?.[0]?.replyMarkup && 'rows' in (origMsgs[0].replyMarkup ?? {})
+      ? (origMsgs[0].replyMarkup as any).rows.length
+      : 0
+
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 1500)) // poll every 1.5s
+    // Fetch the message by ID
+    const msgs = await client.getMessages(botEntityId, { ids: [messageId] })
+    const msg = msgs?.[0]
+    if (!msg) continue
+    const editDate = msg.editDate ?? 0
+    const buttonCount =
+      msg.replyMarkup && 'rows' in (msg.replyMarkup ?? {})
+        ? (msg.replyMarkup as any).rows.length
+        : 0
+    // Edited if: editDate changed, OR button count changed, OR new URLs appeared
+    if (editDate > origEditDate || buttonCount !== origButtonCount) {
+      return msg
     }
   }
   return null
