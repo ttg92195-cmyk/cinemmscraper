@@ -417,3 +417,28 @@ Stage Summary:
   5. Test: GET /api/telegram-status → { connected: true }
 
 - ဒါပြီးရင် /api/scrape-movie က overview + poster + telegramStreamUrls အပြည့် ပြန်မယ်။
+
+---
+Task ID: telegram-login-setup
+Agent: main (Super Z)
+Task: Bro အတွက် Telegram login instructions ပြင်ဆင်
+
+Work Log:
+- Bro ဆီကနေ api_id (38615831) နဲ့ api_hash (5b575a81ca360c0bb0bd98585c6afb6c) ရရှိတယ်။
+- Screenshot ကို VLM နဲ verify လုပ်တယ် — my.telegram.org/apps မှာ app ဖန်တီးပြီး page ဖြစ်တယ်။
+- Bro ကို local environment မှာ login script run ဖို့ လမ်းညွှန်တယ်။
+- scripts/login.mjs file ဖန်တီးတယ် — standalone version (Bro က သီးသန့် folder မှာ npm install telegram input လုပ်ပြီး run နိုင်ဖို့)။
+
+Stage Summary:
+- Bro က သူ့ local မှာ:
+  1. mkdir cinemm-login && cd cinemm-login
+  2. npm init -y && npm install telegram input
+  3. login.mjs file သိမ်း
+  4. TELEGRAM_API_ID=38615831 TELEGRAM_API_HASH=5b575a81ca360c0bb0bd98585c6afb6c node login.mjs
+  5. Phone + SMS code + 2FA password ထည့်
+  6. Session string ကူး
+- ပြီးရင် Railway env vars ထည့်:
+  - TELEGRAM_API_ID=38615831
+  - TELEGRAM_API_HASH=5b575a81ca360c0bb0bd98585c6afb6c
+  - TELEGRAM_SESSION=<the_long_string>
+  - TELEGRAM_BOT_USERNAME=cinemmbot
