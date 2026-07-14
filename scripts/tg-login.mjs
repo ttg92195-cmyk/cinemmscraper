@@ -1,23 +1,17 @@
 /**
- * Telegram Login — SINGLE-STEP (for use inside this chat)
- * =====================================================
+ * Telegram Login — SINGLE-STEP (gramjs v2)
  *
- * ဒီ script ကို run ဖို့ Bro က phone number + SMS code ပေးရမယ်။
- * ဒါပေမဲ့ SMS code က Telegram ပို့ပြီးမှ ရမယ်လို့ ကြိုပြောထားတယ်။
+ * Step A (code request):
+ *   TG_PHONE=+669... node scripts/tg-login.mjs request
+ * Step B (sign-in with code):
+ *   TG_PHONE=+669... node scripts/tg-login.mjs signin <SMS_CODE> [2FA_PASSWORD]
  *
- * တကယ့် flow:
- *   Step A (code request):
- *     TG_PHONE=+959... node scripts/tg-login.mjs request
- *     → Telegram က SMS ပို့မယ်, phoneCodeHash ကို /tmp/tg_phonecodehash.txt ထဲ သိမ်းမယ်
- *
- *   Step B (sign-in with code):
- *     TG_PHONE=+959... node scripts/tg-login.mjs signin 12345
- *     → SMS code ကို သုံးပြီး sign in, session string ထုတ်ပေးမယ်
+ * gramjs v2 uses Api.auth.SendCode, Api.auth.SignIn, Api.auth.CheckPassword
+ * directly. The client.sendCode() method is internal (takes apiCredentials).
  */
 
-import { TelegramClient } from 'telegram'
+import { TelegramClient, Api } from 'telegram'
 import { StringSession } from 'telegram/sessions/index.js'
-import { Api } from 'telegram'
 import fs from 'fs'
 
 const apiId = 38615831
@@ -30,8 +24,8 @@ const PASSWORD_2FA = process.argv[4] // optional, only if 2FA enabled
 
 if (!PHONE || !MODE) {
   console.error('Usage:')
-  console.error('  Step A: TG_PHONE=+959... node scripts/tg-login.mjs request')
-  console.error('  Step B: TG_PHONE=+959... node scripts/tg-login.mjs signin <SMS_CODE> [2FA_PASSWORD]')
+  console.error('  Step A: TG_PHONE=+669... node scripts/tg-login.mjs request')
+  console.error('  Step B: TG_PHONE=+669... node scripts/tg-login.mjs signin <SMS_CODE> [2FA_PASSWORD]')
   process.exit(1)
 }
 
@@ -47,41 +41,79 @@ const client = new TelegramClient(
 await client.connect()
 
 if (MODE === 'request') {
-  // Step A: ask Telegram to send an SMS code
   console.log(`Sending code request to ${PHONE}...`)
   try {
-    const sent = await client.sendCodeRequest(PHONE)
-    const phoneCodeHash = sent.phoneCodeHash
-    fs.writeFileSync(STATE_FILE, JSON.stringify({ phone: PHONE, phoneCodeHash }, null, 2))
+    // Use the raw Api.auth.SendCode constructor
+    // SendCode params: { phoneNumber, apiId, apiHash, settings }
+    const settings = new Api.CodeSettings({
+      allowAppHash: true,
+      allowMissedCall: true,
+      allowFlashCall: true,
+      currentNumber: true,
+    })
+    const result = await client.invoke(
+      new Api.auth.SendCode({
+        phoneNumber: PHONE,
+        apiId,
+        apiHash,
+        settings,
+      }),
+    )
+    // result is Api.auth.SentCode, has phoneCodeHash
+    const phoneCodeHash = result.phoneCodeHash
+    const sentVia = result.type ? result.type.className : 'unknown'
+    fs.writeFileSync(STATE_FILE, JSON.stringify({
+      phone: PHONE,
+      phoneCodeHash,
+      sentVia,
+      timestamp: Date.now(),
+    }, null, 2))
     console.log('')
     console.log('========================================')
     console.log('SMS CODE REQUESTED!')
     console.log('========================================')
-    console.log('Telegram က phone ကို code ပို့မယ် (SMS သို့မဟုတ် Telegram app ထဲ)။')
-    console.log('code ရပြီးတဲ့အခါ ဒီ command run ပါ:')
+    console.log(`Telegram sent the code via: ${sentVia}`)
+    console.log('Check your phone (SMS or Telegram app).')
+    console.log('')
+    console.log('When you receive the code, run:')
     console.log(`  TG_PHONE="${PHONE}" node scripts/tg-login.mjs signin <SMS_CODE>`)
     console.log('')
-    console.log('(phoneCodeHash ကို file ထဲ သိမ်းပြီးသား — ပြန်ထည့်စရာ မလိုဘူး)')
+    console.log('(phoneCodeHash saved to /tmp/tg_login_state.json)')
   } catch (e) {
-    console.error('Code request failed:', e instanceof Error ? e.message : e)
+    const msg = e?.errorMessage ?? e?.message ?? String(e)
+    console.error('Code request failed:', msg)
+    if (msg.includes('PHONE_NUMBER_BANNED')) {
+      console.error('→ This number is banned from Telegram.')
+    } else if (msg.includes('PHONE_NUMBER_INVALID')) {
+      console.error('→ Phone number format is invalid. Use +<country><number>, e.g. +66931522278')
+    } else if (msg.includes('FLOOD_WAIT')) {
+      const m = msg.match(/(\d+)/)
+      console.error(`→ Rate limited. Wait ${m?.[1] ?? 'N'} seconds before retrying.`)
+    }
   }
 } else if (MODE === 'signin') {
-  // Step B: sign in with SMS code
   if (!SMS_CODE) {
-    console.error('Usage: TG_PHONE=+959... node scripts/tg-login.mjs signin <SMS_CODE> [2FA_PASSWORD]')
+    console.error('Usage: TG_PHONE=+669... node scripts/tg-login.mjs signin <SMS_CODE> [2FA_PASSWORD]')
     process.exit(1)
   }
 
-  let state: { phone: string; phoneCodeHash: string }
+  let state
   try {
     state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))
   } catch {
-    console.error('ERROR: အရင် "request" mode ကို run ပါ။')
+    console.error('ERROR: Run "request" mode first.')
     process.exit(1)
   }
 
   if (state.phone !== PHONE) {
-    console.error(`ERROR: phone မတူဘူး။ state ထဲက ${state.phone}, မင်းပေးတဲ့ ${PHONE}`)
+    console.error(`ERROR: phone mismatch. state has ${state.phone}, you provided ${PHONE}`)
+    process.exit(1)
+  }
+
+  // Check code age — Telegram codes expire after ~2 min
+  const ageMs = Date.now() - (state.timestamp ?? 0)
+  if (ageMs > 5 * 60 * 1000) {
+    console.error(`ERROR: phoneCodeHash is too old (${Math.floor(ageMs / 1000)}s). Re-run "request" mode.`)
     process.exit(1)
   }
 
@@ -94,34 +126,32 @@ if (MODE === 'request') {
         phoneCodeHash: state.phoneCodeHash,
       }),
     )
-    // If we got here, no 2FA needed
     const session = client.session.save()
     printSession(session)
-  } catch (e: any) {
+  } catch (e) {
     const msg = e?.errorMessage ?? e?.message ?? String(e)
     if (msg.includes('SESSION_PASSWORD_NEEDED')) {
-      console.log('2FA ပိတ်ထားတယ်။ password လိုတယ်။')
+      console.log('2FA is enabled. Password required.')
       if (!PASSWORD_2FA) {
-        console.log('ဒီ command ကို password ထည့်ပြီး run ပါ:')
+        console.log('Run with password:')
         console.log(`  TG_PHONE="${PHONE}" node scripts/tg-login.mjs signin ${SMS_CODE} <2FA_PASSWORD>`)
-        process.exit(0)
-      }
-      // Try 2FA sign-in
-      try {
-        const pwdSrp = await client.invoke(new Api.account.GetPassword())
-        const passwordSrpResult = await client.computeSrpParams(pwdSrp, PASSWORD_2FA)
-        await client.invoke(
-          new Api.auth.CheckPassword({ password: passwordSrpResult }),
-        )
-        const session = client.session.save()
-        printSession(session)
-      } catch (e2) {
-        console.error('2FA login failed:', e2 instanceof Error ? e2.message : e2)
+      } else {
+        try {
+          const pwdInfo = await client.invoke(new Api.account.GetPassword())
+          const passwordSrp = await client.computeSrpParams(pwdInfo, PASSWORD_2FA)
+          await client.invoke(
+            new Api.auth.CheckPassword({ password: passwordSrp }),
+          )
+          const session = client.session.save()
+          printSession(session)
+        } catch (e2) {
+          console.error('2FA login failed:', e2?.errorMessage ?? e2?.message ?? String(e2))
+        }
       }
     } else if (msg.includes('PHONE_CODE_EXPIRED')) {
-      console.error('SMS code သက်တမ်းကုန်သွားပြီ (၂ မိနစ်ခန့်)။ request mode ကို ပြန် run ပါ။')
+      console.error('SMS code expired. Re-run "request" mode.')
     } else if (msg.includes('PHONE_CODE_INVALID')) {
-      console.error('SMS code မမှန်ဘူး။ ပြန်စစ်ပါ။')
+      console.error('SMS code is invalid. Double-check the digits.')
     } else {
       console.error('Sign-in failed:', msg)
     }
@@ -133,17 +163,17 @@ if (MODE === 'request') {
 await client.disconnect()
 process.exit(0)
 
-function printSession(session: string) {
+function printSession(session) {
   console.log('')
   console.log('========================================')
   console.log('=== LOGIN SUCCESSFUL! ===')
   console.log('========================================')
   console.log('')
-  console.log('TELEGRAM_SESSION (ဒီ string အရှည်ကြီးကို ကူးပါ):')
+  console.log('TELEGRAM_SESSION (copy this entire string):')
   console.log('')
   console.log(session)
   console.log('')
   console.log('========================================')
-  console.log('ဒီ string ကို Railway TELEGRAM_SESSION env var ထဲ ထည့်ပါ။')
+  console.log('Set this as TELEGRAM_SESSION env var on Railway.')
   console.log('========================================')
 }
