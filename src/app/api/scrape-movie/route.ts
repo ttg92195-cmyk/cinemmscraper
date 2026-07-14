@@ -222,25 +222,35 @@ export async function GET(req: NextRequest) {
         const extractedPoster =
           $('img[src*="image.tmdb.org"], img[src*="cinemm"], img[src*="poster"]').first().attr('src') || poster
 
-        attempts.push({ method: 'scraperapi', ok: true, overview: overview.slice(0, 100) })
-
-        return NextResponse.json({
-          id: parseInt(id, 10),
-          name,
-          year,
-          poster: extractedPoster || poster,
-          type,
-          source,
-          overview,
-          telegramLink: actualTelegramLink || telegramLink,
-          streamUrls: [],
-          fetchedAt: new Date().toISOString(),
-          sourceUrl: searchUrl,
-          error: null,
+        // ScraperAPI "succeeded" only if we got a real overview (not RSC junk)
+        const ok = overview.length > 0 && !isRscJunk(overview)
+        attempts.push({
           method: 'scraperapi',
-          attempts,
-          htmlLength: html.length,
+          ok,
+          overview: overview.slice(0, 100),
+          error: ok ? undefined : 'No real overview found in rendered HTML (only RSC shell)',
         })
+
+        if (ok) {
+          return NextResponse.json({
+            id: parseInt(id, 10),
+            name,
+            year,
+            poster: extractedPoster || poster,
+            type,
+            source,
+            overview,
+            telegramLink: actualTelegramLink || telegramLink,
+            streamUrls: [],
+            fetchedAt: new Date().toISOString(),
+            sourceUrl: searchUrl,
+            error: null,
+            method: 'scraperapi',
+            attempts,
+            htmlLength: html.length,
+          })
+        }
+        // Otherwise fall through to fallback
       } else {
         attempts.push({
           method: 'scraperapi',
@@ -318,30 +328,88 @@ function extractOverviewFromText(pageText: string): string {
 }
 
 /**
- * Extract overview text from HTML.
- * Looks for the longest Myanmar text block in the rendered HTML.
+ * Check if a string looks like RSC wire-format junk (not real overview text).
+ * RSC chunks look like: self.__next_f.push([1,"a:{"metadata":...}"])
+ *                      f:"$a:metadata"
+ *                      0:["$","div",null,{"..."}]
+ * These should never be returned as an overview.
+ */
+function isRscJunk(text: string): boolean {
+  if (!text) return true
+  const trimmed = text.trim()
+  // RSC markers that indicate this is wire format, not real text
+  if (trimmed.startsWith('self.__next_f.push')) return true
+  if (trimmed.startsWith('$') && trimmed.length < 200) return true
+  if (/^\d+:\[/.test(trimmed)) return true // e.g. "0:[\"$\",\"div\",null,{...}]"
+  if (/^[0-9a-f]:T[0-9a-f]+,/.test(trimmed)) return true // RSC text chunk
+  if (trimmed.startsWith('f:"')) return true
+  // If the text is mostly JSON-like (lots of backslashes and quotes), it's junk
+  const jsonCharRatio = (trimmed.match(/[\\\[\]{}"]/g)?.length ?? 0) / trimmed.length
+  if (jsonCharRatio > 0.15 && !/[\u1000-\u109F]/.test(trimmed)) return true
+  return false
+}
+
+/**
+ * Extract overview text from HTML returned by ScraperAPI.
+ *
+ * ScraperAPI returns cinemm.com's SPA shell — the HTML contains
+ * self.__next_f.push(...) RSC chunks, not real rendered overview text.
+ * We need to:
+ *   1. Parse all __next_f.push chunks
+ *   2. Look for a T-prefixed text chunk that contains Myanmar characters
+ *   3. Fall back to longest Myanmar text block in the body
  */
 function extractOverviewFromHtml(html: string): string {
   if (!html) return ''
 
+  const candidates: string[] = []
+
+  // Strategy A: Parse self.__next_f.push([1,"..."]) chunks
+  // These contain JSON-encoded RSC data. We unescape and look for Myanmar text.
+  const nextFPushRegex = /self\.__next_f\.push\(\[\s*1\s*,\s*"((?:[^"\\]|\\.)*)"\s*\]\)/g
+  let match: RegExpExecArray | null
+  while ((match = nextFPushRegex.exec(html)) !== null) {
+    try {
+      // Unescape the JSON string literal
+      const raw = match[1]
+      // The raw is a JSON-escaped string — parse it as a JSON string to unescape
+      const unescaped = JSON.parse('"' + raw + '"')
+      // Look for T-prefixed text chunks in the unescaped data: "2:T<hex>,<text>"
+      const tChunkMatches = unescaped.matchAll(/\d+:T[0-9a-f]+,([\s\S]*?)(?=\n\d+:|\n[a-z]:|$)/g)
+      for (const tcm of tChunkMatches) {
+        const text = tcm[1]
+        if (text && text.length > 50 && /[\u1000-\u109F]/.test(text)) {
+          candidates.push(text.trim())
+        }
+      }
+      // Also look for plain Myanmar text blocks (not in T chunks)
+      const myanmarInChunk = unescaped.match(/[\u1000-\u109F][\s\S]{50,}?[\u1000-\u109F]/g)
+      if (myanmarInChunk) {
+        candidates.push(...myanmarInChunk.map((s) => s.trim()))
+      }
+    } catch {
+      // ignore JSON parse errors
+    }
+  }
+
+  // Strategy B: Parse plain text from the body (for fully-rendered pages)
   try {
     const $ = cheerio.load(html)
-    const allText: string[] = []
-
     $('body *').each((_i, el) => {
       const text = $(el).clone().children().remove().end().text().trim()
-      if (text.length > 100 && /[\u1000-\u109F]/.test(text)) {
-        allText.push(text)
+      if (text.length > 100 && /[\u1000-\u109F]/.test(text) && !isRscJunk(text)) {
+        candidates.push(text)
       }
     })
-
-    if (allText.length > 0) {
-      const longest = allText.sort((a, b) => b.length - a.length)[0]
-      return longest ?? ''
-    }
   } catch {
     // ignore parse errors
   }
 
-  return ''
+  if (candidates.length === 0) return ''
+
+  // Sort by length (longest first), filter out RSC junk
+  const valid = candidates.filter((c) => !isRscJunk(c))
+  const pool = valid.length > 0 ? valid : candidates
+  const longest = pool.sort((a, b) => b.length - a.length)[0]
+  return longest ?? ''
 }
