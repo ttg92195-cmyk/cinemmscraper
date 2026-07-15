@@ -20,20 +20,20 @@ import { getCache, setCache } from '@/lib/cache'
 
 const CINEMM_ORIGIN = 'https://cinemm.com'
 
-// Server Action IDs (extracted from cinemm.com's bundled JS — updated 2026-07-14
-// after cinemm.com added a new getMovieSourcesAction and changed how sources work).
-// Mapping verified from page-699f9fbb79a09821.js:
-//   createServerReference("40fd46d989efde0198496371446e1d00b777f8021f", ..., "getMovieSourcesAction")
-//   createServerReference("60bebae00379fff9c39e9dccf659b024a89da4b5b4", ..., "getEpisodeSourcesAction")
-//   createServerReference("608f37e00992dd40df0badde8f2f45e5db62a48046", ..., "searchAction")
-//   createServerReference("60663b32ebac1369c06f990ebeed80f0ec3101d061", ..., "getMovieDetailsAction")
-//   createServerReference("40011a39f4c37fb76852c6cc01a17bd20e98784283", ..., "getSeriesDetailsAction")
+// Server Action IDs (extracted from cinemm.com's bundled JS — updated 2026-07-15
+// after cinemm.com regenerated all action IDs + changed movie IDs to bigints).
+// Mapping verified from page-f46752db4105891f.js:
+//   createServerReference("40f8eb1c1169207ffd4d06dd202d7580609061d2bb", ..., "getMovieSourcesAction")
+//   createServerReference("605765e4f6aa5ce95c001ef982ddc2a6ac62c60930", ..., "getEpisodeSourcesAction")
+//   createServerReference("60ffdc3034e91f62a96097852d58446360f909809e", ..., "searchAction")
+//   createServerReference("60c193f3ef02d7353ffc530e701e0a0dd388f716f0", ..., "getMovieDetailsAction")
+//   createServerReference("40b9e9dc40d8b3b16f4984f373bb59cf57515e283f", ..., "getSeriesDetailsAction")
 const ACTIONS = {
-  search:              '608f37e00992dd40df0badde8f2f45e5db62a48046', // searchAction
-  getMovieServers:     '60663b32ebac1369c06f990ebeed80f0ec3101d061', // getMovieDetailsAction (overview)
-  getMovieSources:     '40fd46d989efde0198496371446e1d00b777f8021f', // getMovieSourcesAction (NEW)
-  getSeriesDetails:    '40011a39f4c37fb76852c6cc01a17bd20e98784283', // getSeriesDetailsAction
-  getEpisodeServers:   '60bebae00379fff9c39e9dccf659b024a89da4b5b4', // getEpisodeSourcesAction
+  search:              '60ffdc3034e91f62a96097852d58446360f909809e', // searchAction
+  getMovieServers:     '60c193f3ef02d7353ffc530e701e0a0dd388f716f0', // getMovieDetailsAction (overview)
+  getMovieSources:     '40f8eb1c1169207ffd4d06dd202d7580609061d2bb', // getMovieSourcesAction
+  getSeriesDetails:    '40b9e9dc40d8b3b16f4984f373bb59cf57515e283f', // getSeriesDetailsAction
+  getEpisodeServers:   '605765e4f6aa5ce95c001ef982ddc2a6ac62c60930', // getEpisodeSourcesAction
 } as const
 
 const COMMON_HEADERS = {
@@ -647,10 +647,12 @@ export async function getMovieDetails(
     }
     
     // Also call getMovieSourcesAction for servers — returns { ok, access, servers }
-    // (currently access="telegram" with empty servers — links moved to Telegram bot,
-    // but the action may return real servers in the future)
+    // NEW (2026-07-15+): getMovieSourcesAction takes a SINGLE arg (the media ID),
+    // not (id, source). Discovered from page-f46752db4105891f.js:
+    //   let t = "movie"===l ? await j(i) : await N(i, Number(n));
+    // where j = getMovieSourcesAction, i = sourceId, n = seriesId
     try {
-      const { lines: sourceLines } = await callAction(ACTIONS.getMovieSources, [id, source])
+      const { lines: sourceLines } = await callAction(ACTIONS.getMovieSources, [id])
       const sourceRaw = sourceLines.get('1')
       if (sourceRaw) {
         const sourceParsed = JSON.parse(sourceRaw) as {
