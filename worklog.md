@@ -504,3 +504,35 @@ Stage Summary:
   consider လုပ်ထားမယ် — ဒါက bot reliability မရတဲ့အခါ အသုံးဝင်မယ်
 - Bro ရဲ့ "ရွှေတွင်းတွေ့တာနဲ့တူပါဘဲ" ဆိုတဲ့ စကားက 5 ရက်တာ
   cat-and-mouse game အနိုင်ရတဲ့ ခံစားချက်ကို ဖော်ပြတယ်
+
+---
+Task ID: railway-volume-success
+Agent: main (Super Z)
+Task: Railway Volume setup verify အပြည့်အစုံ
+
+Work Log:
+- Bro က Railway dashboard မှ Volume setup လုပ်ပြီးပြီ:
+  - Mount path: /app/db
+  - Size: 1GB (free tier)
+  - DATABASE_URL: file:/app/db/custom.db
+- Volume အလုပ်လုပ်ကြောင်း verify လုပ်တယ်:
+  1. Test URL submit (mediaId=volumetest123) → stored: 1 ✅
+  2. Bro က Railway redeploy လုပ်တယ်
+  3. ပြန်စစ်တာ → count: 1 ✅ (data မပျက်ဘူး!)
+- Test entry ကို cleanup လုပ်တယ် (DELETE) → deleted: 1 ✅
+
+Stage Summary:
+- 5 ရက်တာ cat-and-mouse game အပြည့်အစုံ အနိုင်:
+  1. cinemm.com API reverse engineering ✅
+  2. Telegram bot integration ✅
+  3. Shortlink resolver ✅
+  4. Manual stream URL feature ✅
+  5. Railway Volume persistence ✅
+- အခု architecture အပြည့်အစုံ production-ready ဖြစ်ပါပြီ
+- Bro က ဖုန်းနဲ့ပဲ အသုံးပြုနိုင်ပါပြီ:
+  - Search movies/series
+  - Add stream URLs (paste shortlinks)
+  - View stored URLs (shared across users)
+  - Copy/Open/Delete URLs
+- Volume persistent ကြောင့် redeploy လုပ်လည်း data မပျက်ဘူး
+- 7-day TTL auto-expire ဖြစ်တယ်
