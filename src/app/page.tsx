@@ -1447,13 +1447,20 @@ export default function Home() {
         )}
 
         {!loading && !results && !error && (
-          <div className="max-w-md mx-auto text-center py-20 text-zinc-500">
-            <Film className="w-12 h-12 mx-auto mb-4 opacity-40" />
-            <p className="text-lg font-medium text-zinc-300">Search cinemm.com</p>
-            <p className="text-sm mt-2">
-              Type a movie or series name above and hit Search. Click any result to see full post details and download as JSON.
-            </p>
-          </div>
+          <>
+            <div className="max-w-md mx-auto text-center py-20 text-zinc-500">
+              <Film className="w-12 h-12 mx-auto mb-4 opacity-40" />
+              <p className="text-lg font-medium text-zinc-300">Search cinemm.com</p>
+              <p className="text-sm mt-2">
+                Type a movie or series name above and hit Search. Click any result to see full post details and download as JSON.
+              </p>
+            </div>
+
+            {/* Shortlink Resolver — always available, even without searching */}
+            <div className="max-w-3xl mx-auto mt-8">
+              <ShortlinkResolver />
+            </div>
+          </>
         )}
       </main>
       )}
@@ -2627,6 +2634,301 @@ function TelegramStreamLinks({ urls, cached }: { urls: string[]; cached: boolean
       <div className="mt-3 text-[11px] text-zinc-500 flex items-center gap-1.5">
         <Send className="w-3 h-3" />
         Auto-fetched via @cinemmbot — URLs are valid for ~7 days. Click &quot;Open Stream&quot; to play in browser or &quot;Copy URL&quot; to paste in a downloader.
+      </div>
+    </section>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// ShortlinkResolver — Bro pastes cinemm.com shortlinks, we resolve them
+// to real stream URLs via /api/resolve-shortlinks-batch.
+// ---------------------------------------------------------------------------
+interface ResolvedShortlink {
+  shortlink: string
+  streamUrl: string | null
+  cached: boolean
+  error: string | null
+  httpStatus?: number
+}
+
+function ShortlinkResolver() {
+  const [input, setInput] = useState('')
+  const [results, setResults] = useState<ResolvedShortlink[]>([])
+  const [loading, setLoading] = useState(false)
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
+
+  // Parse textarea input → array of URLs (one per line, or space/comma separated)
+  function parseUrls(text: string): string[] {
+    return text
+      .split(/[\n,\s]+/)
+      .map((u) => u.trim())
+      .filter((u) => u.length > 0)
+  }
+
+  async function handleResolve() {
+    const urls = parseUrls(input)
+    if (urls.length === 0) {
+      toast.error('No URLs found. Paste cinemm.com shortlinks.')
+      return
+    }
+    setLoading(true)
+    setResults([])
+    try {
+      const res = await fetch('/api/resolve-shortlinks-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ urls }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        throw new Error(data.error || `Failed (${res.status})`)
+      }
+      setResults(data.results || [])
+      const success = data.success || 0
+      const failed = data.failed || 0
+      if (success > 0 && failed === 0) {
+        toast.success(`Resolved ${success} shortlink${success === 1 ? '' : 's'}`)
+      } else if (success > 0 && failed > 0) {
+        toast.info(`Resolved ${success}, failed ${failed}`)
+      } else {
+        toast.error(`All ${failed} shortlinks failed`)
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to resolve')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function copyToClipboard(text: string, idx: number, type: 'shortlink' | 'streamUrl') {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopiedIdx(idx * 10 + (type === 'shortlink' ? 0 : 1))
+      toast.success(`${type === 'shortlink' ? 'Shortlink' : 'Stream URL'} copied`)
+      setTimeout(() => setCopiedIdx(null), 2000)
+    } catch {
+      toast.error('Failed to copy')
+    }
+  }
+
+  function parseQuality(url: string): string {
+    const m = url.match(/(8K|4K|2160p|1080p|720p|480p)/i)
+    return m ? m[1].toUpperCase() : 'STD'
+  }
+  function parseFormat(url: string): string {
+    const m = url.match(/\.(mkv|mp4|avi|mov|webm)(?:\?|$)/i)
+    return m ? m[1].toUpperCase() : ''
+  }
+  function parseFileName(url: string): string {
+    try {
+      const u = new URL(url)
+      const parts = u.pathname.split('/').filter(Boolean)
+      const last = parts[parts.length - 1]
+      return last ? decodeURIComponent(last) : ''
+    } catch {
+      return ''
+    }
+  }
+  function parseHost(url: string): string {
+    try {
+      const u = new URL(url)
+      return u.hostname.replace(/^www\./, '')
+    } catch {
+      return 'unknown'
+    }
+  }
+
+  const urlCount = parseUrls(input).length
+
+  return (
+    <section className="rounded-lg border border-cyan-800/40 bg-gradient-to-br from-cyan-950/20 via-zinc-950/40 to-blue-950/20 p-3 sm:p-4">
+      <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
+        <h3 className="text-sm font-semibold text-cyan-100 flex items-center gap-2">
+          <Zap className="w-4 h-4 text-cyan-400" />
+          Shortlink Resolver
+          {results.length > 0 && (
+            <Badge variant="outline" className="border-cyan-700/50 text-cyan-300 ml-1">
+              {results.filter((r) => r.streamUrl).length}/{results.length}
+            </Badge>
+          )}
+        </h3>
+        <div className="text-[11px] text-zinc-500">
+          Paste cinemm.com/p/... shortlinks → get real stream URLs
+        </div>
+      </div>
+
+      {/* Input area */}
+      <div className="space-y-2">
+        <textarea
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder="Paste shortlinks here (one per line, or space/comma separated)...&#10;https://cinemm.com/p/R1W_eSSX2hE-qUAl...&#10;https://cinemm.com/p/Oa77DLE_kRMWlGfX..."
+          rows={4}
+          className="w-full rounded-md border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-cyan-600/50 focus:outline-none focus:ring-1 focus:ring-cyan-600/30 font-mono"
+        />
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-xs text-zinc-500">
+            {urlCount > 0 ? `${urlCount} URL${urlCount === 1 ? '' : 's'} ready` : 'No URLs yet'}
+          </div>
+          <Button
+            onClick={handleResolve}
+            disabled={loading || urlCount === 0}
+            size="sm"
+            className="bg-cyan-600 hover:bg-cyan-500 text-white text-xs h-8"
+          >
+            {loading ? (
+              <>
+                <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />
+                Resolving...
+              </>
+            ) : (
+              <>
+                <Zap className="w-3.5 h-3.5 mr-1" />
+                Resolve {urlCount > 0 ? `(${urlCount})` : ''}
+              </>
+            )}
+          </Button>
+        </div>
+      </div>
+
+      {/* Results */}
+      {results.length > 0 && (
+        <div className="mt-3 space-y-2">
+          {results.map((r, i) => {
+            const hasStreamUrl = !!r.streamUrl
+            const quality = hasStreamUrl ? parseQuality(r.streamUrl!) : ''
+            const format = hasStreamUrl ? parseFormat(r.streamUrl!) : ''
+            const fileName = hasStreamUrl ? parseFileName(r.streamUrl!) : ''
+            const host = hasStreamUrl ? parseHost(r.streamUrl!) : ''
+
+            const qualityColor =
+              quality === '4K' || quality === '8K'
+                ? 'border-fuchsia-600/50 bg-fuchsia-950/30 text-fuchsia-300'
+                : quality === '2160p'
+                ? 'border-purple-600/50 bg-purple-950/30 text-purple-300'
+                : quality === '1080p'
+                ? 'border-blue-600/50 bg-blue-950/30 text-blue-300'
+                : quality === '720p'
+                ? 'border-emerald-600/50 bg-emerald-950/30 text-emerald-300'
+                : 'border-zinc-700 bg-zinc-900/40 text-zinc-300'
+
+            return (
+              <div
+                key={i}
+                className={`rounded-md border overflow-hidden ${
+                  hasStreamUrl
+                    ? 'border-zinc-800 bg-zinc-950/60'
+                    : 'border-red-900/50 bg-red-950/20'
+                }`}
+              >
+                {/* Top row: badges */}
+                <div className="flex items-center gap-2 px-3 py-2 border-b border-zinc-800/60 bg-zinc-900/40 flex-wrap">
+                  {hasStreamUrl ? (
+                    <>
+                      {quality && (
+                        <Badge variant="outline" className={`text-xs ${qualityColor}`}>
+                          {quality === '4K' || quality === '8K' ? `🎬 ${quality}` : quality}
+                        </Badge>
+                      )}
+                      {format && (
+                        <Badge variant="outline" className="border-zinc-700 text-zinc-400 text-xs">
+                          {format}
+                        </Badge>
+                      )}
+                      <Badge variant="outline" className="border-zinc-700 text-zinc-500 text-xs">
+                        {host}
+                      </Badge>
+                      {r.cached && (
+                        <Badge variant="outline" className="border-emerald-700/50 text-emerald-300 bg-emerald-950/30 text-xs">
+                          <Check className="w-3 h-3 mr-1" /> Cached
+                        </Badge>
+                      )}
+                      <div className="ml-auto text-xs text-zinc-500 truncate max-w-full">
+                        {fileName}
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <Badge variant="outline" className="border-red-700/50 text-red-300 bg-red-950/30 text-xs">
+                        <AlertTriangle className="w-3 h-3 mr-1" /> Failed
+                      </Badge>
+                      <div className="ml-auto text-xs text-red-300/70 truncate">
+                        {r.error}
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                {/* Middle row: shortlink (the working URL) */}
+                {hasStreamUrl && (
+                  <div className="px-3 py-2 border-b border-zinc-800/60 bg-zinc-950/40">
+                    <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1">
+                      🔗 Shortlink (works in browser)
+                    </div>
+                    <div className="text-xs text-cyan-300 font-mono truncate">{r.shortlink}</div>
+                  </div>
+                )}
+
+                {/* Bottom row: action buttons */}
+                {hasStreamUrl && (
+                  <div className="flex items-center gap-2 px-3 py-2 flex-wrap">
+                    <button
+                      onClick={() => copyToClipboard(r.shortlink!, i, 'shortlink')}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium transition-colors"
+                    >
+                      {copiedIdx === i * 10 ? (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-emerald-400" />
+                          Copied!
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5" />
+                          Copy Shortlink
+                        </>
+                      )}
+                    </button>
+                    <button
+                      onClick={() => copyToClipboard(r.streamUrl!, i, 'streamUrl')}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium transition-colors"
+                    >
+                      {copiedIdx === i * 10 + 1 ? (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-emerald-400" />
+                          Copied!
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5" />
+                          Copy Stream URL
+                        </>
+                      )}
+                    </button>
+                    <a
+                      href={r.shortlink}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-medium transition-colors"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      Open Stream
+                    </a>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Help text */}
+      <div className="mt-3 text-[11px] text-zinc-500 flex items-start gap-1.5">
+        <Zap className="w-3 h-3 mt-0.5 shrink-0" />
+        <div>
+          Paste cinemm.com shortlinks (e.g. https://cinemm.com/p/R1W_...) from a movie post.
+          We resolve them to real stream URLs via Cloudflare redirect. Use &quot;Open Stream&quot; to play in browser (shortlink redirects properly).
+          Stream URLs are cached for 24h.
+        </div>
       </div>
     </section>
   )
