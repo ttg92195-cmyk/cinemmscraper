@@ -1,9 +1,44 @@
 import { PrismaClient } from '@prisma/client'
+import fs from 'fs'
+import path from 'path'
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined
   prismaSchemaEnsured?: boolean
 }
+
+/**
+ * Resolve the SQLite database file path.
+ *
+ * Order of precedence:
+ *   1. DATABASE_URL env var (if set and starts with "file:")
+ *   2. /app/db/custom.db (Railway production — /app is the working dir)
+ *   3. ./db/custom.db (local dev)
+ *
+ * The directory is created if it doesn't exist (Railway ephemeral filesystem
+ * doesn't always have /app/db pre-created).
+ */
+function resolveDatabaseUrl(): string {
+  const envUrl = process.env.DATABASE_URL
+  if (envUrl && envUrl.startsWith('file:')) {
+    const filePath = envUrl.replace(/^file:/, '')
+    const dir = path.dirname(filePath)
+    try {
+      fs.mkdirSync(dir, { recursive: true })
+    } catch {}
+    return envUrl
+  }
+  // Fallback: /app/db/custom.db (Railway) or ./db/custom.db (local)
+  const isProduction = process.env.NODE_ENV === 'production'
+  const filePath = isProduction ? '/app/db/custom.db' : './db/custom.db'
+  const dir = path.dirname(filePath)
+  try {
+    fs.mkdirSync(dir, { recursive: true })
+  } catch {}
+  return `file:${filePath}`
+}
+
+const databaseUrl = resolveDatabaseUrl()
 
 // Disable query logging in dev to reduce overhead (every cache read/write
 // was being logged, which slows down the dev server noticeably).
@@ -11,6 +46,9 @@ export const db =
   globalForPrisma.prisma ??
   new PrismaClient({
     log: ['error', 'warn'],
+    datasources: {
+      db: { url: databaseUrl },
+    },
   })
 
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = db
