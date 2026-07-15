@@ -47,6 +47,9 @@ interface MovieDetails {
   telegramStreamUrls?: string[]
   telegramError?: string | null
   telegramCached?: boolean
+  // New: stream URLs manually submitted by Bro via /api/manual-link
+  manualStreamUrls?: ManualStreamUrlEntry[]
+  manualStreamUrlsCount?: number
   remaining: number
   error?: string | null
   fetchedAt: string
@@ -66,6 +69,9 @@ interface SeriesDetails {
   telegramStreamUrls?: string[]
   telegramError?: string | null
   telegramCached?: boolean
+  // New: stream URLs manually submitted by Bro via /api/manual-link
+  manualStreamUrls?: ManualStreamUrlEntry[]
+  manualStreamUrlsCount?: number
   remaining: number
   error?: string | null
   fetchedAt: string
@@ -110,6 +116,18 @@ interface EpisodeServers {
 }
 
 type Details = MovieDetails | SeriesDetails
+
+// Manually-submitted stream URL entry (from ManualStreamUrl DB table)
+interface ManualStreamUrlEntry {
+  shortlink: string
+  streamUrl: string
+  quality: string
+  format: string
+  host: string
+  fileName: string
+  createdAt: string
+  expiresAt: string
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1755,6 +1773,7 @@ function DetailsView({
   const hasServers = details.type === 'movie' && details.servers.length > 0
   const hasSeasons = details.type === 'series' && details.seasons.length > 0
   const hasTelegramUrls = !!details.telegramStreamUrls && details.telegramStreamUrls.length > 0
+  const hasManualUrls = !!details.manualStreamUrls && details.manualStreamUrls.length > 0
   const hasOverview = !!details.overview
   const isQuotaExceeded = details.error === 'QUOTA_EXCEEDED'
 
@@ -1938,7 +1957,7 @@ function DetailsView({
           cached={!!details.telegramCached}
         />
       )}
-      {details.telegramError && !hasTelegramUrls && (
+      {details.telegramError && !hasTelegramUrls && !hasManualUrls && (
         <section className="rounded-lg border border-amber-900/40 bg-amber-950/20 p-3 text-xs">
           <div className="flex items-start gap-2">
             <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
@@ -1946,12 +1965,33 @@ function DetailsView({
               <div className="font-semibold text-amber-200">Telegram bot fetch failed</div>
               <div className="text-amber-300/70 mt-1">{details.telegramError}</div>
               <div className="text-amber-300/50 mt-1">
-                You can still use the &quot;Get Links via Telegram&quot; button above to fetch manually.
+                You can still use the &quot;Get Links via Telegram&quot; button above to fetch manually,
+                or submit shortlinks via &quot;Add Stream URLs&quot; below.
               </div>
             </div>
           </div>
         </section>
       )}
+
+      {/* Manually-submitted Stream URLs — stored in DB, shared across all users */}
+      {hasManualUrls && (
+        <ManualStreamLinks
+          urls={details.manualStreamUrls!}
+          mediaId={String(item.id)}
+          mediaType={item.type}
+          onDeleted={() => {
+            // Trigger a re-fetch of details to update the list
+            // (caller passes a callback if needed; for now we just rely on next page visit)
+          }}
+        />
+      )}
+
+      {/* Add Stream URLs button — Bro submits shortlinks, they get resolved + stored */}
+      <AddStreamUrlsButton
+        mediaId={String(item.id)}
+        mediaType={item.type}
+        mediaName={item.name}
+      />
 
       {/* Seasons/episodes tree (series) */}
       {hasSeasons && (
@@ -2928,6 +2968,429 @@ function ShortlinkResolver() {
           Paste cinemm.com shortlinks (e.g. https://cinemm.com/p/R1W_...) from a movie post.
           We resolve them to real stream URLs via Cloudflare redirect. Use &quot;Open Stream&quot; to play in browser (shortlink redirects properly).
           Stream URLs are cached for 24h.
+        </div>
+      </div>
+    </section>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// AddStreamUrlsButton — opens a modal where Bro pastes cinemm.com shortlinks.
+// On submit, calls /api/manual-link which resolves + stores them in DB.
+// After successful submit, shows a success message and prompts user to refresh.
+// ---------------------------------------------------------------------------
+function AddStreamUrlsButton({
+  mediaId,
+  mediaType,
+  mediaName,
+}: {
+  mediaId: string
+  mediaType: MediaType
+  mediaName: string
+}) {
+  const [open, setOpen] = useState(false)
+  const [input, setInput] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [result, setResult] = useState<{
+    stored: number
+    failed: number
+    results: Array<{ shortlink: string; streamUrl?: string; stored: boolean; error?: string }>
+  } | null>(null)
+
+  function parseUrls(text: string): string[] {
+    return text
+      .split(/[\n,\s]+/)
+      .map((u) => u.trim())
+      .filter((u) => u.length > 0)
+  }
+
+  async function handleSubmit() {
+    const urls = parseUrls(input)
+    if (urls.length === 0) {
+      toast.error('No URLs found. Paste cinemm.com shortlinks.')
+      return
+    }
+    setSubmitting(true)
+    setResult(null)
+    try {
+      const res = await fetch('/api/manual-link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mediaId,
+          mediaType,
+          shortlinks: urls,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        throw new Error(data.error || `Failed (${res.status})`)
+      }
+      setResult(data)
+      if (data.stored > 0) {
+        toast.success(`Stored ${data.stored} stream URL${data.stored === 1 ? '' : 's'} for ${mediaName}`)
+      } else {
+        toast.error('No URLs could be stored')
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to submit')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function handleClose() {
+    setOpen(false)
+    setInput('')
+    setResult(null)
+    // If we stored any URLs, reload the page so the new URLs show up
+    if (result && result.stored > 0) {
+      window.location.reload()
+    }
+  }
+
+  const urlCount = parseUrls(input).length
+
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
+        className="w-full mt-3 px-3 py-2 rounded-md border border-cyan-800/40 bg-cyan-950/20 hover:bg-cyan-900/30 text-cyan-200 text-xs font-medium transition-colors flex items-center justify-center gap-2"
+      >
+        <Plus className="w-4 h-4" />
+        Add Stream URLs (Manual)
+      </button>
+
+      {open && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+          onClick={handleClose}
+        >
+          <div
+            className="bg-zinc-950 border border-zinc-800 rounded-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto p-4 sm:p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-2 mb-4">
+              <div>
+                <h3 className="text-base font-semibold text-zinc-100 flex items-center gap-2">
+                  <Plus className="w-4 h-4 text-cyan-400" />
+                  Add Stream URLs
+                </h3>
+                <p className="text-xs text-zinc-500 mt-1">
+                  For: <span className="text-zinc-300 font-medium">{mediaName}</span> ({mediaType})
+                </p>
+              </div>
+              <button
+                onClick={handleClose}
+                className="text-zinc-500 hover:text-zinc-300"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {!result ? (
+              <>
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-xs text-zinc-400 mb-1 block">
+                      Paste cinemm.com shortlinks here
+                    </label>
+                    <textarea
+                      value={input}
+                      onChange={(e) => setInput(e.target.value)}
+                      placeholder="https://cinemm.com/p/R1W_eSSX2hE-qUAl...&#10;https://cinemm.com/p/Oa77DLE_kRMWlGfX...&#10;(one per line, or space/comma separated)"
+                      rows={6}
+                      className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-cyan-600/50 focus:outline-none focus:ring-1 focus:ring-cyan-600/30 font-mono"
+                      disabled={submitting}
+                    />
+                    <div className="text-xs text-zinc-500 mt-1">
+                      {urlCount > 0 ? `${urlCount} URL${urlCount === 1 ? '' : 's'} ready` : 'No URLs yet'}
+                    </div>
+                  </div>
+
+                  <div className="text-xs text-zinc-400 bg-zinc-900/60 rounded-md p-3 border border-zinc-800">
+                    <div className="font-medium text-zinc-300 mb-1">How to get shortlinks:</div>
+                    <ol className="list-decimal ml-4 space-y-0.5">
+                      <li>Open cinemm.com and find this movie/series post</li>
+                      <li>Click &quot;Show Sources&quot; button on the post</li>
+                      <li>Copy the shortlinks that appear (e.g. https://cinemm.com/p/...)</li>
+                      <li>Paste them above and click Submit</li>
+                    </ol>
+                    <div className="mt-2 text-zinc-500">
+                      URLs are resolved and stored for 7 days. Anyone viewing this post will see them.
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-end gap-2">
+                    <button
+                      onClick={handleClose}
+                      className="px-3 py-1.5 rounded-md text-zinc-400 hover:text-zinc-200 text-sm"
+                      disabled={submitting}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleSubmit}
+                      disabled={submitting || urlCount === 0}
+                      className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-cyan-600 hover:bg-cyan-500 disabled:bg-zinc-700 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
+                    >
+                      {submitting ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          Resolving + Storing...
+                        </>
+                      ) : (
+                        <>
+                          <Zap className="w-3.5 h-3.5" />
+                          Submit ({urlCount})
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="space-y-3">
+                <div className={`rounded-md p-3 border ${result.stored > 0 ? 'border-emerald-800/50 bg-emerald-950/30' : 'border-red-800/50 bg-red-950/30'}`}>
+                  <div className="flex items-center gap-2">
+                    {result.stored > 0 ? (
+                      <Check className="w-5 h-5 text-emerald-400" />
+                    ) : (
+                      <AlertTriangle className="w-5 h-5 text-red-400" />
+                    )}
+                    <div>
+                      <div className={`font-semibold ${result.stored > 0 ? 'text-emerald-200' : 'text-red-200'}`}>
+                        {result.stored > 0 ? 'Success!' : 'Failed'}
+                      </div>
+                      <div className={`text-xs ${result.stored > 0 ? 'text-emerald-300/80' : 'text-red-300/80'}`}>
+                        Stored: {result.stored} | Failed: {result.failed}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5 max-h-60 overflow-y-auto">
+                  {result.results.map((r, i) => (
+                    <div
+                      key={i}
+                      className={`rounded-md border p-2 text-xs ${
+                        r.stored ? 'border-zinc-800 bg-zinc-900/60' : 'border-red-900/50 bg-red-950/20'
+                      }`}
+                    >
+                      <div className="flex items-start gap-2">
+                        {r.stored ? (
+                          <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
+                        ) : (
+                          <X className="w-3.5 h-3.5 text-red-400 shrink-0 mt-0.5" />
+                        )}
+                        <div className="flex-1 min-w-0">
+                          <div className="text-zinc-300 font-mono truncate">{r.shortlink}</div>
+                          {r.streamUrl && (
+                            <div className="text-emerald-300/70 font-mono truncate mt-0.5">→ {r.streamUrl}</div>
+                          )}
+                          {r.error && (
+                            <div className="text-red-300/70 mt-0.5">{r.error}</div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex justify-end">
+                  <button
+                    onClick={handleClose}
+                    className="px-4 py-1.5 rounded-md bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-medium"
+                  >
+                    {result.stored > 0 ? 'Done (refresh page)' : 'Close'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// ManualStreamLinks — displays stream URLs that were manually submitted
+// (via /api/manual-link) and stored in the ManualStreamUrl DB table.
+// Each URL shows quality/format/host badges + copy/open buttons + delete option.
+// ---------------------------------------------------------------------------
+function ManualStreamLinks({
+  urls,
+  mediaId,
+  mediaType,
+  onDeleted,
+}: {
+  urls: ManualStreamUrlEntry[]
+  mediaId: string
+  mediaType: MediaType
+  onDeleted?: () => void
+}) {
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
+  const [deleting, setDeleting] = useState<number | null>(null)
+
+  async function copyToClipboard(text: string, idx: number, type: 'shortlink' | 'streamUrl') {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopiedIdx(idx * 10 + (type === 'shortlink' ? 0 : 1))
+      toast.success(`${type === 'shortlink' ? 'Shortlink' : 'Stream URL'} copied`)
+      setTimeout(() => setCopiedIdx(null), 2000)
+    } catch {
+      toast.error('Failed to copy')
+    }
+  }
+
+  async function handleDelete(shortlink: string, idx: number) {
+    if (!confirm('Delete this stream URL?')) return
+    setDeleting(idx)
+    try {
+      const url = `/api/manual-link?mediaId=${encodeURIComponent(mediaId)}&mediaType=${mediaType}&shortlink=${encodeURIComponent(shortlink)}`
+      const res = await fetch(url, { method: 'DELETE' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Delete failed')
+      toast.success('Stream URL deleted')
+      // Trigger parent re-fetch
+      onDeleted?.()
+      // Also reload to refresh the list
+      setTimeout(() => window.location.reload(), 500)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to delete')
+    } finally {
+      setDeleting(null)
+    }
+  }
+
+  function qualityColor(quality: string): string {
+    if (quality === '4K' || quality === '8K') return 'border-fuchsia-600/50 bg-fuchsia-950/30 text-fuchsia-300'
+    if (quality === '2160p') return 'border-purple-600/50 bg-purple-950/30 text-purple-300'
+    if (quality === '1080p') return 'border-blue-600/50 bg-blue-950/30 text-blue-300'
+    if (quality === '720p') return 'border-emerald-600/50 bg-emerald-950/30 text-emerald-300'
+    return 'border-zinc-700 bg-zinc-900/40 text-zinc-300'
+  }
+
+  return (
+    <section className="rounded-lg border border-emerald-800/40 bg-gradient-to-br from-emerald-950/20 via-zinc-950/40 to-teal-950/20 p-3 sm:p-4">
+      <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
+        <h3 className="text-sm font-semibold text-emerald-100 flex items-center gap-2">
+          <Database className="w-4 h-4 text-emerald-400" />
+          Stream Links (Community)
+          <Badge variant="outline" className="border-emerald-700/50 text-emerald-300 ml-1">
+            {urls.length}
+          </Badge>
+        </h3>
+        <Badge variant="outline" className="border-emerald-700/50 text-emerald-300 bg-emerald-950/30 text-xs">
+          <Check className="w-3 h-3 mr-1" /> Stored · 7-day TTL
+        </Badge>
+      </div>
+
+      <div className="space-y-2">
+        {urls.map((entry, i) => {
+          const isCopiedShort = copiedIdx === i * 10
+          const isCopiedStream = copiedIdx === i * 10 + 1
+          const isDeleting = deleting === i
+
+          return (
+            <div
+              key={i}
+              className="rounded-md border border-zinc-800 bg-zinc-950/60 hover:border-emerald-700/40 transition-colors overflow-hidden"
+            >
+              {/* Top row: badges */}
+              <div className="flex items-center gap-2 px-3 py-2 border-b border-zinc-800/60 bg-zinc-900/40 flex-wrap">
+                <Badge variant="outline" className={`text-xs ${qualityColor(entry.quality)}`}>
+                  {entry.quality === '4K' || entry.quality === '8K' ? `🎬 ${entry.quality}` : entry.quality}
+                </Badge>
+                {entry.format && (
+                  <Badge variant="outline" className="border-zinc-700 text-zinc-400 text-xs">
+                    {entry.format}
+                  </Badge>
+                )}
+                <Badge variant="outline" className="border-zinc-700 text-zinc-500 text-xs">
+                  {entry.host}
+                </Badge>
+                <div className="ml-auto text-xs text-zinc-500 truncate max-w-full">
+                  {entry.fileName}
+                </div>
+              </div>
+
+              {/* Middle row: shortlink */}
+              <div className="px-3 py-2 border-b border-zinc-800/60 bg-zinc-950/40">
+                <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1">
+                  🔗 Shortlink (works in browser)
+                </div>
+                <div className="text-xs text-emerald-300 font-mono truncate">{entry.shortlink}</div>
+              </div>
+
+              {/* Bottom row: action buttons */}
+              <div className="flex items-center gap-2 px-3 py-2 flex-wrap">
+                <button
+                  onClick={() => copyToClipboard(entry.shortlink, i, 'shortlink')}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium transition-colors"
+                >
+                  {isCopiedShort ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                      Copied!
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5" />
+                      Copy Shortlink
+                    </>
+                  )}
+                </button>
+                <button
+                  onClick={() => copyToClipboard(entry.streamUrl, i, 'streamUrl')}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium transition-colors"
+                >
+                  {isCopiedStream ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                      Copied!
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5" />
+                      Copy Stream URL
+                    </>
+                  )}
+                </button>
+                <a
+                  href={entry.shortlink}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition-colors"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  Open Stream
+                </a>
+                <button
+                  onClick={() => handleDelete(entry.shortlink, i)}
+                  disabled={isDeleting}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-red-900/40 hover:bg-red-800/50 text-red-300 text-xs font-medium transition-colors ml-auto disabled:opacity-50"
+                  title="Delete this stream URL"
+                >
+                  {isDeleting ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <X className="w-3.5 h-3.5" />
+                  )}
+                </button>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      <div className="mt-3 text-[11px] text-zinc-500 flex items-start gap-1.5">
+        <Database className="w-3 h-3 mt-0.5 shrink-0" />
+        <div>
+          These stream URLs were submitted by a user and stored in the database. They are shared
+          across all viewers and cached for 7 days. Use &quot;Open Stream&quot; to play in browser
+          (shortlink redirects properly via Cloudflare).
         </div>
       </div>
     </section>

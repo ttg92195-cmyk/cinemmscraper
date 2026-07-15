@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getDetails, type MediaType } from '@/lib/cinemm'
 import { fetchStreamUrlsFromBot } from '@/lib/telegram-cinemm'
+import { db } from '@/lib/db'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -12,12 +13,13 @@ export const maxDuration = 60
  *   - Movie: name, year, poster, overview, servers[], remaining quota
  *   - Series: name, year, poster, overview (long text with seasons/episodes), episodeImageUrls[]
  *
- * NEW (2026-07-14+): If servers are empty (cinemm.com moved stream URLs to
- * the Telegram bot), this route automatically fetches them via @cinemmbot
- * using the gramjs MTProto user client. The URLs are returned in the
- * `telegramStreamUrls` field. Cached for 7 days.
+ * Stream URLs (3 sources, tried in order):
+ *   1. cinemm.com getMovieSourcesAction — currently returns access="telegram", servers=[]
+ *   2. ManualStreamUrl table — URLs Bro submitted via /api/manual-link
+ *      (persists 7 days, shared across all users)
+ *   3. Telegram bot @cinemmbot — automatic fallback (if session is configured)
  *
- * Results are cached in SQLite so re-fetching the same item is free.
+ * All three are returned in the response so the UI can show whichever is available.
  */
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url)
@@ -70,12 +72,52 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // Attach telegram fields to the response (alongside the existing fields)
+    // Fetch manually-submitted stream URLs from the ManualStreamUrl table.
+    // These are URLs that Bro (or any user) submitted via /api/manual-link.
+    // They persist for 7 days and are shared across all users — so once Bro
+    // submits URLs for a movie, anyone viewing that movie sees them.
+    let manualStreamUrls: Array<{
+      shortlink: string
+      streamUrl: string
+      quality: string
+      format: string
+      host: string
+      fileName: string
+      createdAt: string
+      expiresAt: string
+    }> = []
+    try {
+      const now = new Date()
+      const entries = await db.manualStreamUrl.findMany({
+        where: {
+          mediaId: idStr,
+          mediaType: type,
+          expiresAt: { gt: now },
+        },
+        orderBy: { createdAt: 'desc' },
+      })
+      manualStreamUrls = entries.map((e) => ({
+        shortlink: e.shortlink,
+        streamUrl: e.streamUrl,
+        quality: e.quality,
+        format: e.format,
+        host: e.host,
+        fileName: e.fileName,
+        createdAt: e.createdAt.toISOString(),
+        expiresAt: e.expiresAt.toISOString(),
+      }))
+    } catch (e) {
+      console.error('[/api/details] manualStreamUrls fetch failed:', e)
+    }
+
+    // Attach all stream URL fields to the response
     return NextResponse.json({
       ...details,
       telegramStreamUrls,
       telegramError,
       telegramCached,
+      manualStreamUrls,
+      manualStreamUrlsCount: manualStreamUrls.length,
     }, { status: 200 })
   } catch (e) {
     console.error('[/api/details] error:', e)
