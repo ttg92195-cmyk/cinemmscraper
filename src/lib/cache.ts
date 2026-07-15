@@ -20,7 +20,7 @@
  *     restarts — best of both worlds for a low-traffic personal app.
  */
 
-import { db } from '@/lib/db'
+import { db, ensureSchema } from '@/lib/db'
 
 interface CacheEntry {
   value: unknown
@@ -35,6 +35,7 @@ const memoryCache = new Map<string, CacheEntry>()
 // Layer 2: SQLite (lazy — only used when memory misses)
 async function getFromSqlite<T>(key: string): Promise<T | null> {
   try {
+    await ensureSchema() // ensure tables exist (Railway ephemeral filesystem)
     const row = await db.cinemmCache.findUnique({ where: { cacheKey: key } })
     if (!row) return null
     // Check TTL
@@ -53,6 +54,7 @@ async function getFromSqlite<T>(key: string): Promise<T | null> {
 
 async function setInSqlite(key: string, value: unknown): Promise<void> {
   try {
+    await ensureSchema()
     const payload = JSON.stringify(value)
     await db.cinemmCache.upsert({
       where: { cacheKey: key },

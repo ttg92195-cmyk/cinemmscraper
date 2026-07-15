@@ -1,8 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { db } from '@/lib/db'
+import { db, ensureSchema } from '@/lib/db'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
+
+// Ensure DB tables exist before any request (Railway ephemeral filesystem)
+async function ensureDb() {
+  try {
+    await ensureSchema()
+  } catch {
+    // ignore — table creation is best-effort
+  }
+}
 
 /**
  * POST /api/manual-link
@@ -81,6 +90,7 @@ function parseFileName(url: string): string {
 }
 
 export async function POST(req: NextRequest) {
+  await ensureDb()
   let body: {
     mediaId?: string
     mediaType?: string
@@ -275,6 +285,7 @@ export async function POST(req: NextRequest) {
  * Expired entries (older than 7 days) are filtered out + lazily deleted.
  */
 export async function GET(req: NextRequest) {
+  await ensureDb()
   const { searchParams } = new URL(req.url)
   const mediaId = searchParams.get('mediaId')
   const mediaType = searchParams.get('mediaType') ?? 'movie'
@@ -333,6 +344,7 @@ export async function GET(req: NextRequest) {
  * If shortlink is omitted, deletes ALL entries for the mediaId+mediaType.
  */
 export async function DELETE(req: NextRequest) {
+  await ensureDb()
   const { searchParams } = new URL(req.url)
   const mediaId = searchParams.get('mediaId')
   const mediaType = searchParams.get('mediaType') ?? 'movie'

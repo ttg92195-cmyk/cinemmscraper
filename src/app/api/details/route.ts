@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getDetails, type MediaType } from '@/lib/cinemm'
 import { fetchStreamUrlsFromBot } from '@/lib/telegram-cinemm'
-import { db } from '@/lib/db'
+import { db, ensureSchema } from '@/lib/db'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -46,6 +46,9 @@ export async function GET(req: NextRequest) {
   }
 
   try {
+    // Ensure DB tables exist (Railway ephemeral filesystem)
+    try { await ensureSchema() } catch {}
+
     // Step 1: Fetch movie/series details from cinemm.com
     const details = await getDetails(
       { id, type, source, name, year, poster },

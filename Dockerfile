@@ -57,4 +57,6 @@ EXPOSE 3000
 
 # Start the app — Railway sets $PORT env var automatically
 # HOSTNAME=0.0.0.0 binds to all interfaces (required by Railway healthcheck)
+# DB tables are created automatically on first request via db.ensureSchema()
+# in src/lib/db.ts — no runtime migration command needed.
 CMD ["sh", "-c", "NODE_ENV=production HOSTNAME=0.0.0.0 PORT=${PORT:-3000} bun .next/standalone/server.js"]
