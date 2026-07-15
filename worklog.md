@@ -461,3 +461,46 @@ Work Log:
 Stage Summary:
 - Bro ပြောထားတဲ့အတိုင်း VLC integration + download တိုက်ရိုက် feature တွေ နောက်ပြီး ထည့်ပေးနိုင်တယ်။
 - အခု cinemm.com ပိတ်နေလို့ စောင့်နေရတယ်။ ပြန်ဖွင့်ရင် ဒီ feature တွေ ထည့်ပြီး test လုပ်မယ်။
+
+---
+Task ID: cinemm-strategy-update-2026-07-15
+Agent: main (Super Z)
+Task: Bro ရဲ့ နောက်ဆုံး စိတ်ကူးယူမှု + cinemm.com အသစ် အခြေအနေ မှတ်တမ်း
+
+Work Log:
+- cinemm.com က ၅ ရက်အတွင်း အကြီးအကျယ် redesign လုပ်ခဲ့တယ်:
+  1. Action IDs အားလုံး regenerate
+  2. Media IDs ကို bigint ပြောင်း (ဥပမာ 6611 → 1736115700307574)
+  3. getMovieSourcesAction argument pattern ပြောင်း (source မပါတော့ဘူး)
+  4. Movie collection တိုးတက် — 20000 နီးပါးထိ 估计 (Bro estimate)
+  5. တခြား Myanmar subtitle channels က movies တွေကို သိမ်းယူထားတယ် (consolidation)
+
+- Bro ရဲ့ စိတ်ကူးယူမှု (GOLDEN IDEA):
+  "cinemm.com က Telegram bot update လုပ်တဲ့အခါ Bro (user) က bot ထဲမှာ
+  တိုက်ရိုက် message ပို့ပြီး link ကို ယူပါ။ ပြီးရင် ကျွန်တော့် website ရဲ့
+  post ထဲမှာ အဲဒီ link ကို ဖြည့်ပါ။ ဒါဆိုရင် Telegram bot ပိတ်သွားရင်တောင်
+  link တွေ မပျောက်အောင် လုပ်နိုင်တယ်။"
+
+- ဒီ idea က backup strategy ဖြစ်တယ်:
+  - Primary: Telegram bot API (auto, server-side)
+  - Backup: Bro က bot ထဲမှာ တိုက်ရိုက် link ယူ → website post ထဲ ဖြည့်
+  - ဒါက bot ပိတ်သွားရင်တောင် historical data ရနိုင်တယ်
+
+- ယခုလက်ရှိ အောင်မြင်တဲ့ အရာတွေ:
+  - ✅ Search Action (bigint ID ပြန်)
+  - ✅ getMovieDetailsAction (overview ရ)
+  - ✅ Poster URL
+  - ✅ Overview text အပြည့်
+  - ✅ Movie collection တိုး (20000 နီးပါး — Bro estimate)
+
+- စောင့်ကြည့်နေတဲ့ အရာ:
+  - ⏳ Telegram bot update (bigint ID ခံမယ့်အချိန်)
+
+Stage Summary:
+- Bro က cinemm.com ကို ဆက်လက်စောင့်ကြည့်နေတယ်
+- Telegram bot update ဖြစ်တဲ့အခါ Bro က အသိပေးမယ်
+- အဲဒီအခါ ကျွန်တော်တို့ bot integration ပြန်test လုပ်မယ်
+- Bro ရဲ့ backup idea (bot ထဲက link ယူပြီး website ထဲ ဖြည့်) ကိုလည်း
+  consider လုပ်ထားမယ် — ဒါက bot reliability မရတဲ့အခါ အသုံးဝင်မယ်
+- Bro ရဲ့ "ရွှေတွင်းတွေ့တာနဲ့တူပါဘဲ" ဆိုတဲ့ စကားက 5 ရက်တာ
+  cat-and-mouse game အနိုင်ရတဲ့ ခံစားချက်ကို ဖော်ပြတယ်
