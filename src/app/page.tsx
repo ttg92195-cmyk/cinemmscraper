@@ -113,6 +113,9 @@ interface EpisodeServers {
   remaining: number
   error: string | null
   fetchedAt: string
+  // New: manually-submitted stream URLs for this episode
+  manualStreamUrls?: ManualStreamUrlEntry[]
+  manualStreamUrlsCount?: number
 }
 
 type Details = MovieDetails | SeriesDetails
@@ -358,6 +361,7 @@ function buildJsonPayload(
   manualDownloadLinks: ParsedDownloadLink[] = [],
   manualWatchLinks: ParsedWatchLink[] = [],
   resolvedTmdbId: number | null = null,
+  episodeManualUrls?: Map<number, ManualStreamUrlEntry[]>,
 ) {
   const overview = details?.overview ?? ''
   const metadata = parseOverviewMetadata(overview)
@@ -391,11 +395,16 @@ function buildJsonPayload(
       episodes: s.episodes.map((e) => {
         const epServers = episodeServers?.get(e.id) ?? []
         const { downloadLinks, watchLinks } = splitServers(epServers)
+        // Merge in manually-submitted stream URLs for THIS episode (if any)
+        const epManualUrls = episodeManualUrls?.get(e.id) ?? []
+        const epManualLinks = manualStreamUrlsToLinks(epManualUrls)
+        const mergedDownloadLinks = [...epManualLinks.downloadLinks, ...downloadLinks]
+        const mergedWatchLinks = [...epManualLinks.watchLinks, ...watchLinks]
         return {
           name: e.name || `Episode ${e.episode_number}`,
-          videoUrl: watchLinks[0]?.url ?? downloadLinks[0]?.url ?? '',
-          downloadLinks,
-          watchLinks,
+          videoUrl: mergedWatchLinks[0]?.url ?? mergedDownloadLinks[0]?.url ?? '',
+          downloadLinks: mergedDownloadLinks,
+          watchLinks: mergedWatchLinks,
         }
       }),
     }))
@@ -472,10 +481,14 @@ export default function Home() {
   const [episodeServers, setEpisodeServers] = useState<Map<number, Server[]>>(new Map())
   const [episodeServersLoading, setEpisodeServersLoading] = useState<Set<number>>(new Set())
   const [episodeServersError, setEpisodeServersError] = useState<Set<number>>(new Set())
+  // Manually-submitted stream URLs per episode (keyed by episode ID)
+  const [episodeManualUrls, setEpisodeManualUrls] = useState<Map<number, ManualStreamUrlEntry[]>>(new Map())
   // Ref mirror of episodeServers so async loops (like Auto Open All) can read
   // the latest value without stale-closure issues. Updated in an effect.
   const episodeServersRef = useRef(episodeServers)
   useEffect(() => { episodeServersRef.current = episodeServers }, [episodeServers])
+  const episodeManualUrlsRef = useRef(episodeManualUrls)
+  useEffect(() => { episodeManualUrlsRef.current = episodeManualUrls }, [episodeManualUrls])
   const [expandedSeasons, setExpandedSeasons] = useState<Set<number>>(new Set())
   const [selectedEpisode, setSelectedEpisode] = useState<number | null>(null)
 
@@ -601,6 +614,7 @@ export default function Home() {
         setDetailsLoading(true)
         setCopied(false)
         setEpisodeServers(new Map())
+    setEpisodeManualUrls(new Map())
         setEpisodeServersLoading(new Set())
         setEpisodeServersError(new Set())
         setExpandedSeasons(new Set())
@@ -782,6 +796,7 @@ export default function Home() {
     setDetailsLoading(true)
     setCopied(false)
     setEpisodeServers(new Map())
+    setEpisodeManualUrls(new Map())
     setEpisodeServersLoading(new Set())
     setEpisodeServersError(new Set())
     setExpandedSeasons(new Set())
@@ -887,6 +902,7 @@ export default function Home() {
     setDetailsError(null)
     setCopied(false)
     setEpisodeServers(new Map())
+    setEpisodeManualUrls(new Map())
     setEpisodeServersLoading(new Set())
     setEpisodeServersError(new Set())
     setExpandedSeasons(new Set())
@@ -909,6 +925,7 @@ export default function Home() {
         setDetailsError(null)
         setCopied(false)
         setEpisodeServers(new Map())
+    setEpisodeManualUrls(new Map())
         setEpisodeServersLoading(new Set())
         setEpisodeServersError(new Set())
         setExpandedSeasons(new Set())
@@ -961,8 +978,15 @@ export default function Home() {
         return next
       })
       try {
-        // Server-side fetch via API route (Vercel IP, no CORS issues).
-        const res = await fetch(`/api/episode-servers?episodeId=${episodeId}&source=${source}`)
+        // Server-side fetch via API route.
+        // Pass mediaId + mediaType so the backend can also return manualStreamUrls.
+        const params = new URLSearchParams({
+          episodeId: String(episodeId),
+          source,
+          mediaId: String(selected?.id ?? ''),
+          mediaType: selected?.type ?? 'series',
+        })
+        const res = await fetch(`/api/episode-servers?${params.toString()}`)
         const data: EpisodeServers = await res.json()
         if (!res.ok) throw new Error((data as { error?: string }).error || `Failed (${res.status})`)
         if (data.error === 'RATE_LIMITED') {
@@ -970,6 +994,18 @@ export default function Home() {
           toast.warning('cinemm.com rate-limited — try again in a moment', { id: `ep-${episodeId}`, duration: 6000 })
         } else {
           setEpisodeServers((prev) => new Map(prev).set(episodeId, data.servers))
+        }
+        // Save manual stream URLs (if any) — even if cinemm.com rate-limited
+        if (data.manualStreamUrls && data.manualStreamUrls.length > 0) {
+          setEpisodeManualUrls((prev) => new Map(prev).set(episodeId, data.manualStreamUrls!))
+        } else {
+          // Clear if empty (e.g. previously had URLs but now expired)
+          setEpisodeManualUrls((prev) => {
+            if (!prev.has(episodeId)) return prev
+            const next = new Map(prev)
+            next.delete(episodeId)
+            return next
+          })
         }
       } catch {
         setEpisodeServersError((prev) => new Set(prev).add(episodeId))
@@ -982,7 +1018,7 @@ export default function Home() {
         })
       }
     },
-    [episodeServers, episodeServersLoading],
+    [episodeServers, episodeServersLoading, selected],
   )
 
 
@@ -1064,6 +1100,7 @@ export default function Home() {
       [...manualDownloadLinks, ...storedLinks.downloadLinks],
       [...manualWatchLinks, ...storedLinks.watchLinks],
       tmdbId,
+      episodeManualUrlsRef.current, // ← per-episode manual URLs
     )
     const name = sanitizeFilename(selected.name || `id-${selected.id}`)
     const year = selected.year || 'unknown'
@@ -1083,6 +1120,7 @@ export default function Home() {
       [...manualDownloadLinks, ...storedLinks.downloadLinks],
       [...manualWatchLinks, ...storedLinks.watchLinks],
       tmdbId,
+      episodeManualUrlsRef.current, // ← per-episode manual URLs
     )
     try {
       await navigator.clipboard.writeText(JSON.stringify(payload, null, 2))
@@ -1673,6 +1711,7 @@ export default function Home() {
               episodeServers={episodeServers}
               episodeServersLoading={episodeServersLoading}
               episodeServersError={episodeServersError}
+              episodeManualUrls={episodeManualUrls}
               expandedSeasons={expandedSeasons}
               selectedEpisode={selectedEpisode}
               onToggleSeason={toggleSeason}
@@ -1816,6 +1855,7 @@ interface DetailsViewProps {
   episodeServers: Map<number, Server[]>
   episodeServersLoading: Set<number>
   episodeServersError: Set<number>
+  episodeManualUrls: Map<number, ManualStreamUrlEntry[]>
   expandedSeasons: Set<number>
   selectedEpisode: number | null
   onToggleSeason: (seasonId: number) => void
@@ -1831,6 +1871,7 @@ function DetailsView({
   episodeServers,
   episodeServersLoading,
   episodeServersError,
+  episodeManualUrls,
   expandedSeasons,
   selectedEpisode,
   onToggleSeason,
@@ -2139,6 +2180,7 @@ function DetailsView({
                           servers={episodeServers.get(ep.id)}
                           isLoading={episodeServersLoading.has(ep.id)}
                           hasError={episodeServersError.has(ep.id)}
+                          manualUrls={episodeManualUrls.get(ep.id)}
                           onClick={() => {
                             if (selectedEpisode === ep.id) {
                               onSelectEpisode(null)
@@ -2194,10 +2236,11 @@ interface EpisodeRowProps {
   servers?: Server[]
   isLoading: boolean
   hasError: boolean
+  manualUrls?: ManualStreamUrlEntry[]
   onClick: () => void
 }
 
-function EpisodeRow({ episode, isSelected, servers, isLoading, hasError, onClick }: EpisodeRowProps) {
+function EpisodeRow({ episode, isSelected, servers, isLoading, hasError, manualUrls, onClick }: EpisodeRowProps) {
   return (
     <div>
       <button
@@ -2282,6 +2325,18 @@ function EpisodeRow({ episode, isSelected, servers, isLoading, hasError, onClick
           ) : (
             <div className="text-xs text-zinc-500 py-2">No servers available for this episode.</div>
           )}
+
+          {/* Manually-submitted stream URLs for this episode (from DB) */}
+          {manualUrls && manualUrls.length > 0 && (
+            <EpisodeManualUrlsList episode={episode} urls={manualUrls} />
+          )}
+
+          {/* Add Stream URLs button — per-episode submission */}
+          <EpisodeAddStreamUrlsButton
+            episode={episode}
+            mediaId={episode.tv_show_id ? String(episode.tv_show_id) : ''}
+            mediaType="series"
+          />
         </div>
       )}
     </div>
@@ -3463,5 +3518,309 @@ function ManualStreamLinks({
         </div>
       </div>
     </section>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// EpisodeAddStreamUrlsButton — per-episode "Add Stream URLs" button.
+// Opens a modal where Bro pastes shortlinks. On submit, calls /api/manual-link
+// with episodeId so URLs are stored specifically for this episode.
+// ---------------------------------------------------------------------------
+function EpisodeAddStreamUrlsButton({
+  episode,
+  mediaId,
+  mediaType,
+}: {
+  episode: Episode
+  mediaId: string
+  mediaType: MediaType
+}) {
+  const [open, setOpen] = useState(false)
+  const [input, setInput] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [result, setResult] = useState<{
+    stored: number
+    failed: number
+  } | null>(null)
+
+  function parseUrls(text: string): string[] {
+    return text.split(/[\n,\s]+/).map((u) => u.trim()).filter((u) => u.length > 0)
+  }
+
+  async function handleSubmit() {
+    const urls = parseUrls(input)
+    if (urls.length === 0) {
+      toast.error('No URLs found')
+      return
+    }
+    setSubmitting(true)
+    setResult(null)
+    try {
+      const res = await fetch('/api/manual-link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mediaId,
+          mediaType,
+          episodeId: String(episode.id), // ← per-episode storage
+          shortlinks: urls,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || `Failed (${res.status})`)
+      setResult({ stored: data.stored || 0, failed: data.failed || 0 })
+      if (data.stored > 0) {
+        toast.success(`Stored ${data.stored} URL(s) for Episode ${episode.episode_number}`)
+      } else {
+        toast.error('No URLs could be stored')
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to submit')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function handleClose() {
+    setOpen(false)
+    setInput('')
+    setResult(null)
+    if (result && result.stored > 0) {
+      // Reload to refresh the episode's URL list
+      window.location.reload()
+    }
+  }
+
+  const urlCount = parseUrls(input).length
+  const epLabel = `E${String(episode.episode_number).padStart(2, '0')}`
+
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
+        className="w-full mt-2 px-2.5 py-1.5 rounded border border-cyan-800/40 bg-cyan-950/20 hover:bg-cyan-900/30 text-cyan-200 text-[11px] font-medium transition-colors flex items-center justify-center gap-1.5"
+      >
+        <Plus className="w-3 h-3" />
+        Add Stream URLs for {epLabel}
+      </button>
+
+      {open && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+          onClick={handleClose}
+        >
+          <div
+            className="bg-zinc-950 border border-zinc-800 rounded-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto p-4 sm:p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-2 mb-4">
+              <div>
+                <h3 className="text-base font-semibold text-zinc-100 flex items-center gap-2">
+                  <Plus className="w-4 h-4 text-cyan-400" />
+                  Add Stream URLs — Episode {episode.episode_number}
+                </h3>
+                <p className="text-xs text-zinc-500 mt-1">
+                  {episode.name || `Episode ${episode.episode_number}`} · Episode ID: {episode.id}
+                </p>
+              </div>
+              <button onClick={handleClose} className="text-zinc-500 hover:text-zinc-300">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {!result ? (
+              <div className="space-y-3">
+                <div>
+                  <label className="text-xs text-zinc-400 mb-1 block">
+                    Paste cinemm.com shortlinks here
+                  </label>
+                  <textarea
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    placeholder="https://cinemm.com/p/R1W_eSSX2hE-qUAl...&#10;https://cinemm.com/p/Oa77DLE_kRMWlGfX..."
+                    rows={5}
+                    className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-cyan-600/50 focus:outline-none focus:ring-1 focus:ring-cyan-600/30 font-mono"
+                    disabled={submitting}
+                  />
+                  <div className="text-xs text-zinc-500 mt-1">
+                    {urlCount > 0 ? `${urlCount} URL${urlCount === 1 ? '' : 's'} ready` : 'No URLs yet'}
+                  </div>
+                </div>
+
+                <div className="text-xs text-zinc-400 bg-zinc-900/60 rounded-md p-3 border border-zinc-800">
+                  <div className="font-medium text-zinc-300 mb-1">How to get shortlinks:</div>
+                  <ol className="list-decimal ml-4 space-y-0.5">
+                    <li>Open cinemm.com and find this series</li>
+                    <li>Click the episode → &quot;Show Sources&quot;</li>
+                    <li>Copy the shortlinks that appear</li>
+                    <li>Paste them above and click Submit</li>
+                  </ol>
+                  <div className="mt-2 text-zinc-500">
+                    URLs are stored specifically for this episode. Cached for 7 days.
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2">
+                  <button
+                    onClick={handleClose}
+                    className="px-3 py-1.5 rounded-md text-zinc-400 hover:text-zinc-200 text-sm"
+                    disabled={submitting}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleSubmit}
+                    disabled={submitting || urlCount === 0}
+                    className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-cyan-600 hover:bg-cyan-500 disabled:bg-zinc-700 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
+                  >
+                    {submitting ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        Storing...
+                      </>
+                    ) : (
+                      <>
+                        <Zap className="w-3.5 h-3.5" />
+                        Submit ({urlCount})
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div className={`rounded-md p-3 border ${result.stored > 0 ? 'border-emerald-800/50 bg-emerald-950/30' : 'border-red-800/50 bg-red-950/30'}`}>
+                  <div className="flex items-center gap-2">
+                    {result.stored > 0 ? (
+                      <Check className="w-5 h-5 text-emerald-400" />
+                    ) : (
+                      <AlertTriangle className="w-5 h-5 text-red-400" />
+                    )}
+                    <div>
+                      <div className={`font-semibold ${result.stored > 0 ? 'text-emerald-200' : 'text-red-200'}`}>
+                        {result.stored > 0 ? 'Success!' : 'Failed'}
+                      </div>
+                      <div className={`text-xs ${result.stored > 0 ? 'text-emerald-300/80' : 'text-red-300/80'}`}>
+                        Stored: {result.stored} | Failed: {result.failed}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex justify-end">
+                  <button
+                    onClick={handleClose}
+                    className="px-4 py-1.5 rounded-md bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-medium"
+                  >
+                    {result.stored > 0 ? 'Done (refresh)' : 'Close'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// EpisodeManualUrlsList — displays stream URLs stored for a specific episode.
+// Compact version of ManualStreamLinks, sized to fit inside episode card.
+// ---------------------------------------------------------------------------
+function EpisodeManualUrlsList({
+  episode,
+  urls,
+}: {
+  episode: Episode
+  urls: ManualStreamUrlEntry[]
+}) {
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
+
+  async function copyToClipboard(text: string, idx: number) {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopiedIdx(idx)
+      toast.success('URL copied')
+      setTimeout(() => setCopiedIdx(null), 2000)
+    } catch {
+      toast.error('Failed to copy')
+    }
+  }
+
+  function qualityColor(quality: string): string {
+    if (quality === '4K' || quality === '8K') return 'border-fuchsia-600/50 bg-fuchsia-950/30 text-fuchsia-300'
+    if (quality === '2160p') return 'border-purple-600/50 bg-purple-950/30 text-purple-300'
+    if (quality === '1080p') return 'border-blue-600/50 bg-blue-950/30 text-blue-300'
+    if (quality === '720p') return 'border-emerald-600/50 bg-emerald-950/30 text-emerald-300'
+    return 'border-zinc-700 bg-zinc-900/40 text-zinc-300'
+  }
+
+  return (
+    <div className="mt-2 pt-2 border-t border-zinc-800/60">
+      <div className="flex items-center gap-1.5 mb-1.5">
+        <Database className="w-3 h-3 text-emerald-400" />
+        <span className="text-[10px] uppercase tracking-wider text-emerald-300/80 font-semibold">
+          Stream Links (Episode)
+        </span>
+        <Badge variant="outline" className="border-emerald-700/50 text-emerald-300 text-[10px] px-1 py-0">
+          {urls.length}
+        </Badge>
+      </div>
+      <div className="space-y-1">
+        {urls.map((entry, i) => {
+          const isCopied = copiedIdx === i
+          return (
+            <div
+              key={i}
+              className="rounded border border-zinc-800 bg-zinc-950/60 hover:border-emerald-700/40 transition-colors overflow-hidden"
+            >
+              <div className="flex items-center gap-1.5 px-2 py-1 border-b border-zinc-800/60 bg-zinc-900/40 flex-wrap">
+                <Badge variant="outline" className={`text-[10px] px-1 py-0 ${qualityColor(entry.quality)}`}>
+                  {entry.quality === '4K' || entry.quality === '8K' ? `🎬 ${entry.quality}` : entry.quality}
+                </Badge>
+                {entry.format && (
+                  <Badge variant="outline" className="border-zinc-700 text-zinc-400 text-[10px] px-1 py-0">
+                    {entry.format}
+                  </Badge>
+                )}
+                <Badge variant="outline" className="border-zinc-700 text-zinc-500 text-[10px] px-1 py-0">
+                  {entry.host.split('.')[0]}
+                </Badge>
+                <div className="ml-auto text-[10px] text-zinc-500 truncate max-w-[60%]">
+                  {entry.fileName}
+                </div>
+              </div>
+              <div className="flex items-center gap-1 px-2 py-1">
+                <button
+                  onClick={() => copyToClipboard(entry.streamUrl, i)}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-[10px] font-medium transition-colors"
+                >
+                  {isCopied ? (
+                    <>
+                      <Check className="w-2.5 h-2.5 text-emerald-400" />
+                      Copied
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-2.5 h-2.5" />
+                      Copy URL
+                    </>
+                  )}
+                </button>
+                <a
+                  href={entry.shortlink}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-medium transition-colors"
+                >
+                  <ExternalLink className="w-2.5 h-2.5" />
+                  Open
+                </a>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
   )
 }

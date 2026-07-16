@@ -40,23 +40,28 @@ model CinemmCache {
   updatedAt DateTime @updatedAt
 }
 
-// Manually-submitted stream URLs for a movie/series.
+// Manually-submitted stream URLs for a movie/series/episode.
 // Bro copies shortlinks from cinemm.com post page (after clicking 'Show Sources'),
 // pastes them via the UI, and we resolve + store them here.
 // Other users (and Bro on future visits) see these URLs on the movie post page.
 // TTL: 7 days (stream URLs are stable per movie, but cinemm.com may rotate them).
+//
+// For movies: mediaId = movie bigint ID, episodeId = null
+// For series top-level: mediaId = series bigint ID, episodeId = null
+// For episodes: mediaId = series bigint ID, episodeId = episode bigint ID
 model ManualStreamUrl {
-  id        String   @id @default(cuid())
-  mediaId   String   // cinemm.com bigint ID (as string — SQLite doesn't natively support bigints)
-  mediaType String   // 'movie' | 'series'
-  shortlink String   // https://cinemm.com/p/R1W_...
-  streamUrl String   // resolved real URL (e.g. https://cmappsecond8.cmdrive.xyz/...mp4)
-  quality   String   // '4K' | '2160p' | '1080p' | '720p' | '480p' | 'STD'
-  format    String   // 'MKV' | 'MP4' | 'AVI' | '' (empty if unknown)
-  host      String   // hostname of streamUrl (e.g. 'cmappsecond8.cmdrive.xyz')
-  fileName  String   // last path segment of streamUrl, URL-decoded
-  createdAt DateTime @default(now())
-  expiresAt DateTime // 7 days from createdAt
+  id         String   @id @default(cuid())
+  mediaId    String   // cinemm.com bigint ID (as string)
+  mediaType  String   // 'movie' | 'series'
+  episodeId  String?  // cinemm.com episode bigint ID (null for movie/series top-level)
+  shortlink  String   // https://cinemm.com/p/R1W_...
+  streamUrl  String   // resolved real URL (e.g. https://cmappsecond8.cmdrive.xyz/...mp4)
+  quality    String   // '4K' | '2160p' | '1080p' | '720p' | '480p' | 'STD'
+  format     String   // 'MKV' | 'MP4' | 'AVI' | '' (empty if unknown)
+  host       String   // hostname of streamUrl (e.g. 'cmappsecond8.cmdrive.xyz')
+  fileName   String   // last path segment of streamUrl, URL-decoded
+  createdAt  DateTime @default(now())
+  expiresAt  DateTime // 7 days from createdAt
 
-  @@index([mediaId, mediaType]) // fast lookup by movie/series
+  @@index([mediaId, mediaType, episodeId]) // fast lookup by movie/series/episode
 }

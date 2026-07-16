@@ -94,6 +94,7 @@ export async function POST(req: NextRequest) {
   let body: {
     mediaId?: string
     mediaType?: string
+    episodeId?: string | null
     shortlinks?: string[]
   }
   try {
@@ -102,7 +103,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
-  const { mediaId, mediaType, shortlinks } = body
+  const { mediaId, mediaType, episodeId, shortlinks } = body
 
   // Validate inputs
   if (!mediaId || typeof mediaId !== 'string') {
@@ -114,6 +115,8 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     )
   }
+  // episodeId is optional — only set for per-episode URLs in series
+  const epId = episodeId ?? null
   if (!Array.isArray(shortlinks) || shortlinks.length === 0) {
     return NextResponse.json(
       { error: 'Missing or empty "shortlinks" array' },
@@ -200,13 +203,13 @@ export async function POST(req: NextRequest) {
       const expiresAt = new Date()
       expiresAt.setDate(expiresAt.getDate() + TTL_DAYS)
 
-      // Upsert into DB — if the same shortlink already exists for this media,
+      // Upsert into DB — if the same shortlink already exists for this media+episode,
       // update it (refresh TTL + metadata); otherwise insert new.
       try {
-        // Find existing by (mediaId, shortlink) — note: SQLite doesn't support
+        // Find existing by (mediaId, episodeId, shortlink) — note: SQLite doesn't support
         // composite unique constraints easily, so we query first.
         const existing = await db.manualStreamUrl.findFirst({
-          where: { mediaId, shortlink },
+          where: { mediaId, episodeId: epId, shortlink },
         })
         if (existing) {
           await db.manualStreamUrl.update({
@@ -225,6 +228,7 @@ export async function POST(req: NextRequest) {
             data: {
               mediaId,
               mediaType,
+              episodeId: epId,
               shortlink,
               streamUrl,
               quality,
@@ -278,10 +282,12 @@ export async function POST(req: NextRequest) {
 }
 
 /**
- * GET /api/manual-link?mediaId=<id>&mediaType=<movie|series>
+ * GET /api/manual-link?mediaId=<id>&mediaType=<movie|series>&episodeId=<id?>
  *
- * Returns all stored stream URLs for a given movie/series.
- * Used by /api/details to populate the `manualStreamUrls` field.
+ * Returns all stored stream URLs for a given movie/series/episode.
+ * - Without episodeId: returns URLs stored at movie/series level (episodeId is null)
+ * - With episodeId: returns URLs stored for that specific episode
+ * Used by /api/details and /api/episode-servers to populate `manualStreamUrls`.
  * Expired entries (older than 7 days) are filtered out + lazily deleted.
  */
 export async function GET(req: NextRequest) {
@@ -289,6 +295,7 @@ export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url)
   const mediaId = searchParams.get('mediaId')
   const mediaType = searchParams.get('mediaType') ?? 'movie'
+  const episodeId = searchParams.get('episodeId') // null/absent = top-level URLs
 
   if (!mediaId) {
     return NextResponse.json({ error: 'Missing "mediaId"' }, { status: 400 })
@@ -301,28 +308,31 @@ export async function GET(req: NextRequest) {
   }
 
   const now = new Date()
-  // Fetch non-expired entries
+  // Fetch non-expired entries — filter by episodeId (null for top-level)
+  const where: any = {
+    mediaId,
+    mediaType,
+    expiresAt: { gt: now },
+  }
+  if (episodeId) {
+    where.episodeId = episodeId
+  } else {
+    where.episodeId = null
+  }
   const entries = await db.manualStreamUrl.findMany({
-    where: {
-      mediaId,
-      mediaType,
-      expiresAt: { gt: now },
-    },
+    where,
     orderBy: { createdAt: 'desc' },
   })
 
-  // Lazily delete expired entries for this mediaId (background cleanup)
+  // Lazily delete expired entries for this scope (background cleanup)
   db.manualStreamUrl.deleteMany({
-    where: {
-      mediaId,
-      mediaType,
-      expiresAt: { lte: now },
-    },
+    where: { ...where, expiresAt: { lte: now } },
   }).catch(() => {}) // fire-and-forget
 
   return NextResponse.json({
     mediaId,
     mediaType,
+    episodeId: episodeId ?? null,
     count: entries.length,
     manualStreamUrls: entries.map((e) => ({
       shortlink: e.shortlink,
@@ -348,6 +358,7 @@ export async function DELETE(req: NextRequest) {
   const { searchParams } = new URL(req.url)
   const mediaId = searchParams.get('mediaId')
   const mediaType = searchParams.get('mediaType') ?? 'movie'
+  const episodeId = searchParams.get('episodeId') // optional
   const shortlink = searchParams.get('shortlink')
 
   if (!mediaId) {
@@ -355,6 +366,12 @@ export async function DELETE(req: NextRequest) {
   }
 
   const where: any = { mediaId, mediaType }
+  // Match episodeId scope (null for top-level, specific ID for episodes)
+  if (episodeId) {
+    where.episodeId = episodeId
+  } else {
+    where.episodeId = null
+  }
   if (shortlink) {
     where.shortlink = shortlink
   }
@@ -365,6 +382,7 @@ export async function DELETE(req: NextRequest) {
     deleted: result.count,
     mediaId,
     mediaType,
+    episodeId: episodeId ?? null,
     shortlink: shortlink ?? '(all)',
   })
 }
