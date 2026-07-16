@@ -76,9 +76,11 @@ export async function GET(req: NextRequest) {
     }
 
     // Fetch manually-submitted stream URLs from the ManualStreamUrl table.
-    // These are URLs that Bro (or any user) submitted via /api/manual-link.
-    // They persist for 7 days and are shared across all users — so once Bro
-    // submits URLs for a movie, anyone viewing that movie sees them.
+    // For movies: returns URLs stored at movie level (episodeId is null).
+    // For series: returns URLs stored at series top-level (episodeId is null).
+    //   Episode-level URLs (episodeId != null) are NOT included here — they're
+    //   fetched per-episode via /api/episode-servers.
+    // This prevents episode URLs from showing up in the series-level UI.
     let manualStreamUrls: Array<{
       shortlink: string
       streamUrl: string
@@ -95,6 +97,7 @@ export async function GET(req: NextRequest) {
         where: {
           mediaId: idStr,
           mediaType: type,
+          episodeId: null, // ← only top-level URLs (not episode-level)
           expiresAt: { gt: now },
         },
         orderBy: { createdAt: 'desc' },
