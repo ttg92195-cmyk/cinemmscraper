@@ -753,8 +753,19 @@ export async function getSeriesDetails(
     let seasons: CinemmSeason[] = []
     if (seasonsJson) {
       try {
-        const parsed = JSON.parse(seasonsJson) as { ok?: boolean; seasons?: CinemmSeason[] }
+        const parsed = JSON.parse(seasonsJson) as {
+          ok?: boolean
+          seasons?: CinemmSeason[]
+          overview?: string
+          message?: string
+        }
         seasons = parsed.seasons ?? []
+        // NEW: some series (e.g. Girl Next Room: Motorbike Baby) return overview
+        // as a JSON field on line "1:" instead of as a T chunk on line "2:".
+        // If we don't have an overview from line "2:" but JSON has one, use it.
+        if (!overview && parsed.overview && parsed.overview !== '$undefined') {
+          overview = parsed.overview
+        }
       } catch (e) {
         console.error('Failed to parse seasons JSON:', e)
       }
