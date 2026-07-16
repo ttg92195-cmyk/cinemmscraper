@@ -679,7 +679,12 @@ export async function getMovieDetails(
     // details.overview is empty.)
 
     // Return what we have — UI shows movie info + Telegram button
-    if (!result.error) await setCached(key, result)
+    // IMPORTANT: only cache if we got real content (overview or servers).
+    // Caching empty results would cause future requests to return empty
+    // data without re-fetching from cinemm.com.
+    if (!result.error && (result.overview.length > 0 || result.servers.length > 0)) {
+      await setCached(key, result)
+    }
     return result
   }
   // Fallback after all retries
