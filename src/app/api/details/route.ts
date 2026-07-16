@@ -55,15 +55,28 @@ export async function GET(req: NextRequest) {
       { useCache, visitorUuid },
     ) as any
 
-    // Step 2: If servers are empty AND we have an overview (i.e. getDetails succeeded),
-    // fetch stream URLs from the @cinemmbot Telegram bot.
-    // cinemm.com moved stream URLs to Telegram — getMovieSourcesAction returns
-    // { ok: true, access: "telegram", servers: [] }
+    // Step 2: Telegram bot auto-fetch is DISABLED by default.
+    //
+    // WHY: Previously, every /api/details call would auto-message @cinemmbot
+    // to fetch stream URLs. This is dangerous because:
+    //   1. High message volume → Telegram FloodWait errors
+    //   2. cinemm.com (bot owner) may detect suspicious activity
+    //   3. Bro's burner account could get banned
+    //   4. cinemm.com could block the bot entirely
+    //
+    // The shortlink resolver (/api/resolve-shortlink) + manual URL submission
+    // (/api/manual-link) is now the primary way to get stream URLs — it's
+    // 100% reliable and doesn't touch the Telegram bot at all.
+    //
+    // To re-enable bot auto-fetch, set ?skipTelegram=false explicitly
+    // (e.g. for testing). By default, skipTelegram defaults to true here.
     let telegramStreamUrls: string[] = []
     let telegramError: string | null = null
     let telegramCached = false
     const hasServers = 'servers' in details && details.servers && details.servers.length > 0
-    if (!skipTelegram && !hasServers) {
+    // Default: skip Telegram bot (safety). Only enable if explicitly requested.
+    const effectiveSkipTelegram = skipTelegram !== false ? true : false
+    if (!effectiveSkipTelegram && !hasServers) {
       try {
         const deepLink = type === 'movie' ? `w_m_${id}` : `w_s_${id}`
         const tgResult = await fetchStreamUrlsFromBot(deepLink)
