@@ -2096,12 +2096,18 @@ function DetailsView({
         />
       )}
 
-      {/* Add Stream URLs button — Bro submits shortlinks, they get resolved + stored */}
-      <AddStreamUrlsButton
-        mediaId={String(item.id)}
-        mediaType={item.type}
-        mediaName={item.name}
-      />
+      {/* Add Stream URLs button — Bro submits shortlinks, they get resolved + stored.
+          For movies, this is the top-level button.
+          For series, we DON'T show this here — the per-episode button inside
+          each EpisodeRow is the correct place (series-level URLs don't make sense
+          when each episode has different stream URLs). */}
+      {item.type === 'movie' && (
+        <AddStreamUrlsButton
+          mediaId={String(item.id)}
+          mediaType={item.type}
+          mediaName={item.name}
+        />
+      )}
 
       {/* Seasons/episodes tree (series) */}
       {hasSeasons && (
@@ -2176,6 +2182,7 @@ function DetailsView({
                           key={ep.id}
                           episode={ep}
                           source={item.source}
+                          seriesId={String(item.id)}
                           isSelected={selectedEpisode === ep.id}
                           servers={episodeServers.get(ep.id)}
                           isLoading={episodeServersLoading.has(ep.id)}
@@ -2232,6 +2239,7 @@ function DetailsView({
 interface EpisodeRowProps {
   episode: Episode
   source: string
+  seriesId: string // parent series bigint ID (for storing per-episode URLs)
   isSelected: boolean
   servers?: Server[]
   isLoading: boolean
@@ -2240,7 +2248,7 @@ interface EpisodeRowProps {
   onClick: () => void
 }
 
-function EpisodeRow({ episode, isSelected, servers, isLoading, hasError, manualUrls, onClick }: EpisodeRowProps) {
+function EpisodeRow({ episode, isSelected, servers, isLoading, hasError, manualUrls, seriesId, onClick }: EpisodeRowProps) {
   return (
     <div>
       <button
@@ -2334,7 +2342,7 @@ function EpisodeRow({ episode, isSelected, servers, isLoading, hasError, manualU
           {/* Add Stream URLs button — per-episode submission */}
           <EpisodeAddStreamUrlsButton
             episode={episode}
-            mediaId={episode.tv_show_id ? String(episode.tv_show_id) : ''}
+            mediaId={seriesId}
             mediaType="series"
           />
         </div>
