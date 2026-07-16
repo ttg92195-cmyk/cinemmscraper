@@ -258,6 +258,49 @@ function splitServers(servers: Server[]): {
   return { downloadLinks, watchLinks }
 }
 
+/**
+ * Convert manually-submitted stream URLs (from ManualStreamUrl DB table) into
+ * ParsedDownloadLink / ParsedWatchLink format, so they can be merged into the
+ * JSON payload's downloadLinks[] and watchLinks[] arrays.
+ *
+ * We use the SHORTLINK as the URL (not the underlying streamUrl) because:
+ *   - Shortlink works in browser (Cloudflare 302 redirect → real file)
+ *   - Shortlink works in download managers (IDM/aria2 follow redirects)
+ *   - The real streamUrl returns 403 due to cinemm.com's anti-hotlinking
+ *     (referrer-policy: no-referrer)
+ *
+ * Each entry appears in BOTH downloadLinks and watchLinks so the user can
+ * use whichever they prefer. serverName indicates the source + quality.
+ */
+function manualStreamUrlsToLinks(
+  urls: ManualStreamUrlEntry[],
+): { downloadLinks: ParsedDownloadLink[]; watchLinks: ParsedWatchLink[] } {
+  const downloadLinks: ParsedDownloadLink[] = []
+  const watchLinks: ParsedWatchLink[] = []
+  for (const entry of urls) {
+    // Derive a friendly server name from the host (e.g. "stream.cmreel.com" → "Cmreel")
+    const hostFirstSegment = entry.host.split('.')[0].replace(/^stream\.?/, '') || entry.host
+    const capitalizedName =
+      hostFirstSegment.charAt(0).toUpperCase() + hostFirstSegment.slice(1)
+    const qualityLabel = entry.quality === 'STD' ? '' : ` (${entry.quality})`
+
+    downloadLinks.push({
+      serverName: `${capitalizedName}${qualityLabel} - Download`,
+      url: entry.shortlink,
+      size: 'N/A',
+      quality: entry.quality,
+      fileName: entry.fileName,
+    })
+    watchLinks.push({
+      serverName: `${capitalizedName}${qualityLabel} - Stream`,
+      url: entry.shortlink,
+      size: 'N/A',
+      quality: entry.quality,
+    })
+  }
+  return { downloadLinks, watchLinks }
+}
+
 /** Parse overview text to extract categories, resolution, fileSize, format. */
 function parseOverviewMetadata(overview: string): {
   categories: string[]
@@ -1005,7 +1048,19 @@ export default function Home() {
     if (!selected) return
     // Use the ref to get the latest episode servers (avoids stale closure
     // when called right after Auto Open All finishes).
-    const payload = buildJsonPayload(selected, details, episodeServersRef.current, manualDownloadLinks, manualWatchLinks, tmdbId)
+    // Also merge in any manually-submitted stream URLs (from ManualStreamUrl DB table)
+    // so they appear in the JSON's downloadLinks[] and watchLinks[] arrays.
+    const storedLinks = details?.manualStreamUrls
+      ? manualStreamUrlsToLinks(details.manualStreamUrls)
+      : { downloadLinks: [], watchLinks: [] }
+    const payload = buildJsonPayload(
+      selected,
+      details,
+      episodeServersRef.current,
+      [...manualDownloadLinks, ...storedLinks.downloadLinks],
+      [...manualWatchLinks, ...storedLinks.watchLinks],
+      tmdbId,
+    )
     const name = sanitizeFilename(selected.name || `id-${selected.id}`)
     const year = selected.year || 'unknown'
     downloadJson(`${name}_${year}_${selected.type}_${selected.id}.json`, payload)
@@ -1014,7 +1069,17 @@ export default function Home() {
 
   const handleCopyJson = useCallback(async () => {
     if (!selected) return
-    const payload = buildJsonPayload(selected, details, episodeServersRef.current, manualDownloadLinks, manualWatchLinks, tmdbId)
+    const storedLinks = details?.manualStreamUrls
+      ? manualStreamUrlsToLinks(details.manualStreamUrls)
+      : { downloadLinks: [], watchLinks: [] }
+    const payload = buildJsonPayload(
+      selected,
+      details,
+      episodeServersRef.current,
+      [...manualDownloadLinks, ...storedLinks.downloadLinks],
+      [...manualWatchLinks, ...storedLinks.watchLinks],
+      tmdbId,
+    )
     try {
       await navigator.clipboard.writeText(JSON.stringify(payload, null, 2))
       setCopied(true)
