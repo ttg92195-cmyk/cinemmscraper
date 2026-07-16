@@ -37,8 +37,22 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    // Step 1: Fetch episode servers from cinemm.com
-    const result: any = await getEpisodeServers(episodeId, source, { useCache, visitorUuid })
+    // Step 1: Fetch episode servers from cinemm.com (may fail — that's OK,
+    // we still want to return manually-submitted URLs even if cinemm.com is down)
+    let result: any = null
+    try {
+      result = await getEpisodeServers(episodeId, source, { useCache, visitorUuid })
+    } catch (cinemmErr) {
+      console.error('[/api/episode-servers] cinemm.com fetch failed:', cinemmErr instanceof Error ? cinemmErr.message : 'unknown')
+      // Don't throw — continue to fetch manual URLs
+      result = {
+        episodeId,
+        servers: [],
+        remaining: 0,
+        error: cinemmErr instanceof Error ? cinemmErr.message : 'cinemm.com fetch failed',
+        fetchedAt: new Date().toISOString(),
+      }
+    }
 
     // Step 2: Fetch manually-submitted stream URLs for this episode (if mediaId provided)
     let manualStreamUrls: Array<{
