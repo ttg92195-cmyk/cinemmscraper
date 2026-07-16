@@ -1130,8 +1130,19 @@ export default function Home() {
             // TMDB lookup failed — continue without it
           }
         }
-        // Build movie entry with TMDB ID
-        const payload = buildJsonPayload(item, details, undefined, [], [], resolvedTmdbId)
+        // Build movie entry with TMDB ID + manually-submitted stream URLs
+        // (from the ManualStreamUrl DB table — fetched via /api/details)
+        const storedLinks = (details as any)?.manualStreamUrls
+          ? manualStreamUrlsToLinks((details as any).manualStreamUrls)
+          : { downloadLinks: [], watchLinks: [] }
+        const payload = buildJsonPayload(
+          item,
+          details,
+          undefined,
+          storedLinks.downloadLinks,
+          storedLinks.watchLinks,
+          resolvedTmdbId,
+        )
         if (Array.isArray(payload.movies)) {
           movies.push(payload.movies[0])
         }
