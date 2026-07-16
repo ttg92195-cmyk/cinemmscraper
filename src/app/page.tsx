@@ -263,11 +263,15 @@ function splitServers(servers: Server[]): {
  * ParsedDownloadLink / ParsedWatchLink format, so they can be merged into the
  * JSON payload's downloadLinks[] and watchLinks[] arrays.
  *
- * We use the SHORTLINK as the URL (not the underlying streamUrl) because:
- *   - Shortlink works in browser (Cloudflare 302 redirect → real file)
- *   - Shortlink works in download managers (IDM/aria2 follow redirects)
- *   - The real streamUrl returns 403 due to cinemm.com's anti-hotlinking
- *     (referrer-policy: no-referrer)
+ * We use the REAL STREAM URL (not the shortlink) per Bro's request — they want
+ * the underlying file URL, not cinemm.com's redirect wrapper. This works in:
+ *   - Download managers (IDM/aria2/Free Download Manager) — they fetch directly
+ *   - Scripts/tools that don't need browser referrer
+ *
+ * Note: The real stream URL returns 403 in browsers due to cinemm.com's
+ * anti-hotlinking (referrer-policy: no-referrer). If Bro needs to play in
+ * browser, they can still use the shortlink from the "Stream Links (Community)"
+ * section above the JSON download buttons.
  *
  * Each entry appears in BOTH downloadLinks and watchLinks so the user can
  * use whichever they prefer. serverName indicates the source + quality.
@@ -286,14 +290,14 @@ function manualStreamUrlsToLinks(
 
     downloadLinks.push({
       serverName: `${capitalizedName}${qualityLabel} - Download`,
-      url: entry.shortlink,
+      url: entry.streamUrl, // ← real stream URL (not shortlink)
       size: 'N/A',
       quality: entry.quality,
       fileName: entry.fileName,
     })
     watchLinks.push({
       serverName: `${capitalizedName}${qualityLabel} - Stream`,
-      url: entry.shortlink,
+      url: entry.streamUrl, // ← real stream URL (not shortlink)
       size: 'N/A',
       quality: entry.quality,
     })
