@@ -54,13 +54,18 @@ export const db =
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = db
 
 /**
- * Ensure all required tables exist in the SQLite database.
+ * Ensure all required tables AND columns exist in the SQLite database.
  *
  * Why: Railway's filesystem is ephemeral — the SQLite file resets on every
  * deploy (unless a persistent volume is mounted). Prisma's `db push` only
  * runs at build time, so the tables exist in the build image but get wiped
  * at runtime. This function runs raw `CREATE TABLE IF NOT EXISTS` SQL on
  * first DB access, ensuring the tables always exist.
+ *
+ * It also runs `ALTER TABLE ADD COLUMN IF NOT EXISTS` for any columns that
+ * were added in later schema versions (e.g. episodeId was added after the
+ * initial ManualStreamUrl table was created). SQLite doesn't support
+ * `IF NOT EXISTS` on ADD COLUMN, so we check PRAGMA table_info first.
  *
  * Idempotent: safe to call multiple times. The `prismaSchemaEnsured` flag
  * prevents re-running the SQL on every request.
@@ -88,6 +93,7 @@ export async function ensureSchema(): Promise<void> {
         "id" TEXT NOT NULL PRIMARY KEY,
         "mediaId" TEXT NOT NULL,
         "mediaType" TEXT NOT NULL,
+        "episodeId" TEXT,
         "shortlink" TEXT NOT NULL,
         "streamUrl" TEXT NOT NULL,
         "quality" TEXT NOT NULL,
@@ -98,7 +104,21 @@ export async function ensureSchema(): Promise<void> {
         "expiresAt" DATETIME NOT NULL
       )
     `)
-    await db.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "ManualStreamUrl_mediaId_mediaType_idx" ON "ManualStreamUrl"("mediaId", "mediaType")`)
+    await db.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "ManualStreamUrl_mediaId_mediaType_episodeId_idx" ON "ManualStreamUrl"("mediaId", "mediaType", "episodeId")`)
+
+    // MIGRATION: For existing ManualStreamUrl tables created before episodeId
+    // was added, add the column now. SQLite doesn't support ADD COLUMN IF NOT
+    // EXISTS, so we check PRAGMA table_info first.
+    const columns = await db.$queryRaw<Array<{ name: string }>>`
+      PRAGMA table_info("ManualStreamUrl")
+    `
+    const columnNames = columns.map((c) => c.name)
+    if (!columnNames.includes('episodeId')) {
+      console.log('[db] Migrating ManualStreamUrl: adding episodeId column')
+      await db.$executeRawUnsafe(`
+        ALTER TABLE "ManualStreamUrl" ADD COLUMN "episodeId" TEXT
+      `)
+    }
 
     // User and Post tables (from default schema — may not be used but kept for compat)
     await db.$executeRawUnsafe(`
@@ -122,7 +142,7 @@ export async function ensureSchema(): Promise<void> {
       )
     `)
 
-    console.log('[db] Schema ensured — all tables exist')
+    console.log('[db] Schema ensured — all tables and columns exist')
   } catch (e) {
     console.error('[db] ensureSchema failed:', e instanceof Error ? e.message : e)
     // Don't throw — let the request fail naturally if tables really are missing.
