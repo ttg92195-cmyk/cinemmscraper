@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
-import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight, ArrowLeft, KeyRound, Settings, Plus, Zap, ChevronLeft, Send, Upload } from 'lucide-react'
+import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight, ArrowLeft, KeyRound, Settings, Plus, Zap, ChevronLeft, Send, Upload, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -2358,7 +2358,12 @@ function EpisodeRow({ episode, isSelected, servers, isLoading, hasError, manualU
 
           {/* Manually-submitted stream URLs for this episode (from DB) */}
           {manualUrls && manualUrls.length > 0 && (
-            <EpisodeManualUrlsList episode={episode} urls={manualUrls} />
+            <EpisodeManualUrlsList
+              episode={episode}
+              urls={manualUrls}
+              mediaId={seriesId}
+              mediaType="series"
+            />
           )}
 
           {/* Add Stream URLs button — per-episode submission */}
@@ -3756,15 +3761,21 @@ function EpisodeAddStreamUrlsButton({
 // ---------------------------------------------------------------------------
 // EpisodeManualUrlsList — displays stream URLs stored for a specific episode.
 // Compact version of ManualStreamLinks, sized to fit inside episode card.
+// Includes a delete button (trash icon) for each URL.
 // ---------------------------------------------------------------------------
 function EpisodeManualUrlsList({
   episode,
   urls,
+  mediaId,
+  mediaType,
 }: {
   episode: Episode
   urls: ManualStreamUrlEntry[]
+  mediaId: string
+  mediaType: MediaType
 }) {
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
+  const [deletingIdx, setDeletingIdx] = useState<number | null>(null)
 
   async function copyToClipboard(text: string, idx: number) {
     try {
@@ -3774,6 +3785,24 @@ function EpisodeManualUrlsList({
       setTimeout(() => setCopiedIdx(null), 2000)
     } catch {
       toast.error('Failed to copy')
+    }
+  }
+
+  async function handleDelete(shortlink: string, idx: number) {
+    if (!confirm('Delete this stream URL?')) return
+    setDeletingIdx(idx)
+    try {
+      const url = `/api/manual-link?mediaId=${encodeURIComponent(mediaId)}&mediaType=${mediaType}&episodeId=${encodeURIComponent(String(episode.id))}&shortlink=${encodeURIComponent(shortlink)}`
+      const res = await fetch(url, { method: 'DELETE' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Delete failed')
+      toast.success('Stream URL deleted')
+      // Reload to refresh the episode's URL list
+      setTimeout(() => window.location.reload(), 500)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to delete')
+    } finally {
+      setDeletingIdx(null)
     }
   }
 
@@ -3799,6 +3828,7 @@ function EpisodeManualUrlsList({
       <div className="space-y-1">
         {urls.map((entry, i) => {
           const isCopied = copiedIdx === i
+          const isDeleting = deletingIdx === i
           return (
             <div
               key={i}
@@ -3846,6 +3876,18 @@ function EpisodeManualUrlsList({
                   <ExternalLink className="w-2.5 h-2.5" />
                   Open
                 </a>
+                <button
+                  onClick={() => handleDelete(entry.shortlink, i)}
+                  disabled={isDeleting}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-red-900/40 hover:bg-red-800/50 text-red-300 text-[10px] font-medium transition-colors ml-auto disabled:opacity-50"
+                  title="Delete this stream URL"
+                >
+                  {isDeleting ? (
+                    <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                  ) : (
+                    <Trash2 className="w-2.5 h-2.5" />
+                  )}
+                </button>
               </div>
             </div>
           )
