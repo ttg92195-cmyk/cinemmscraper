@@ -140,6 +140,28 @@ function sanitizeFilename(name: string): string {
   return name.replace(/[^a-zA-Z0-9-_]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '')
 }
 
+/**
+ * Wrap cinemm.com image URLs with our /api/img proxy.
+ * cinemm.com sets `cross-origin-resource-policy: same-origin`, which blocks
+ * browsers from loading images on other domains. Our proxy fetches the image
+ * server-side and returns it with permissive CORS headers.
+ *
+ * For non-cinemm URLs (e.g. storage01.orangeplay.org), we also proxy them
+ * since they may have similar protections.
+ *
+ * Empty/null URLs are returned as-is (the UI handles empty posters separately).
+ */
+function proxyImage(url: string | undefined | null): string {
+  if (!url) return ''
+  // Already a relative/proxied URL? Return as-is.
+  if (url.startsWith('/api/')) return url
+  // Only proxy cinemm.com and known CDN hosts
+  if (url.includes('cinemm.com') || url.includes('orangeplay.org')) {
+    return `/api/img?url=${encodeURIComponent(url)}`
+  }
+  return url
+}
+
 // ---------------------------------------------------------------------------
 // JSON payload builders — match the user's desired format:
 //   { movies: [{ title, year, poster, overview, type, tmdbId, categories,
@@ -1815,7 +1837,7 @@ function ResultCard({
         <div className="aspect-[2/3] bg-zinc-800 relative overflow-hidden">
           {item.poster ? (
             <img
-              src={item.poster}
+              src={proxyImage(item.poster)}
               alt={item.name}
               loading="lazy"
               className="w-full h-full object-cover"
@@ -1930,7 +1952,7 @@ function DetailsView({
         <div className="w-24 sm:w-32 shrink-0">
           <div className="aspect-[2/3] rounded-md overflow-hidden bg-zinc-800 border border-zinc-800">
             {item.poster ? (
-              <img src={item.poster} alt={item.name} className="w-full h-full object-cover" />
+              <img src={proxyImage(item.poster)} alt={item.name} className="w-full h-full object-cover" />
             ) : (
               <div className="w-full h-full flex items-center justify-center text-zinc-600">
                 <Film className="w-6 h-6" />
@@ -2260,7 +2282,7 @@ function EpisodeRow({ episode, isSelected, servers, isLoading, hasError, manualU
         <div className="w-16 h-10 rounded overflow-hidden bg-zinc-800 shrink-0">
           {episode.poster ? (
             <img
-              src={episode.poster}
+              src={proxyImage(episode.poster)}
               alt={`Episode ${episode.episode_number}`}
               loading="lazy"
               className="w-full h-full object-cover"
