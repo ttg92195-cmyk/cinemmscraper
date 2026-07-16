@@ -664,26 +664,32 @@ export default function Home() {
             if (fetched.type === 'series' && (fetched as SeriesDetails).seasons.length > 0) {
               setExpandedSeasons(new Set([(fetched as SeriesDetails).seasons[0].id]))
             }
-            // TMDB lookup — read API key directly from localStorage (not state)
-            // because the state might not be populated yet on initial page load.
+            // TMDB lookup — NON-BLOCKING (fire and forget).
+            // Previously this used `await`, which blocked the details from showing
+            // until TMDB responded (or timed out after ~10s). Now we start the
+            // TMDB lookup in the background and update the UI when it completes.
+            // The details page is shown immediately — TMDB ID appears a moment later.
             const storedTmdbKey = window.localStorage.getItem('cinemm_tmdb_api_key')
             if (storedTmdbKey && item.name) {
               setTmdbIdLoading(true)
-              try {
-                const tmdbUrl = new URL('/api/tmdb-id', window.location.origin)
-                tmdbUrl.searchParams.set('name', item.name)
-                tmdbUrl.searchParams.set('year', item.year)
-                tmdbUrl.searchParams.set('type', item.type)
-                tmdbUrl.searchParams.set('apiKey', storedTmdbKey)
-                const tmdbRes = await fetch(tmdbUrl.toString())
-                const tmdbData = (await tmdbRes.json()) as { tmdbId?: number | null; error?: string }
-                if (tmdbRes.ok) setTmdbId(tmdbData.tmdbId ?? null)
-                else setTmdbIdError(tmdbData.error || `Failed (${tmdbRes.status})`)
-              } catch (err) {
-                setTmdbIdError(err instanceof Error ? err.message : 'Failed to look up TMDB ID')
-              } finally {
-                setTmdbIdLoading(false)
-              }
+              // Fire-and-forget: don't await this
+              ;(async () => {
+                try {
+                  const tmdbUrl = new URL('/api/tmdb-id', window.location.origin)
+                  tmdbUrl.searchParams.set('name', item.name)
+                  tmdbUrl.searchParams.set('year', item.year)
+                  tmdbUrl.searchParams.set('type', item.type)
+                  tmdbUrl.searchParams.set('apiKey', storedTmdbKey)
+                  const tmdbRes = await fetch(tmdbUrl.toString())
+                  const tmdbData = (await tmdbRes.json()) as { tmdbId?: number | null; error?: string }
+                  if (tmdbRes.ok) setTmdbId(tmdbData.tmdbId ?? null)
+                  else setTmdbIdError(tmdbData.error || `Failed (${tmdbRes.status})`)
+                } catch (err) {
+                  setTmdbIdError(err instanceof Error ? err.message : 'Failed to look up TMDB ID')
+                } finally {
+                  setTmdbIdLoading(false)
+                }
+              })()
             }
           } catch (err) {
             setDetailsError(err instanceof Error ? err.message : 'Failed to load details')
