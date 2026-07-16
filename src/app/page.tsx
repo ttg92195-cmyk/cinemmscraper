@@ -485,8 +485,17 @@ function downloadJson(filename: string, data: unknown) {
 // ---------------------------------------------------------------------------
 
 export default function Home() {
-  const [query, setQuery] = useState('')
-  const [mediaType, setMediaType] = useState<MediaType>('movie')
+  // Initialize query + mediaType from URL on first render (if present).
+  // This lets users bookmark/share search URLs and have them restore on reload.
+  const [query, setQuery] = useState(() => {
+    if (typeof window === 'undefined') return ''
+    return new URLSearchParams(window.location.search).get('search') ?? ''
+  })
+  const [mediaType, setMediaType] = useState<MediaType>(() => {
+    if (typeof window === 'undefined') return 'movie'
+    const t = new URLSearchParams(window.location.search).get('type')
+    return t === 'series' ? 'series' : 'movie'
+  })
   const [results, setResults] = useState<SearchItem[] | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -617,6 +626,7 @@ export default function Home() {
   // On initial page load, check if the URL has view=details params.
   // If so, auto-open the detail page — this lets users share/bookmark
   // detail URLs and have them work on a fresh page load.
+  // Also, if URL has ?search=...&type=... (no view=details), auto-run search.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     if (params.get('view') === 'details') {
@@ -698,6 +708,18 @@ export default function Home() {
           }
         })()
       }
+    } else {
+      // No view=details — if URL has ?search=..., auto-run the search
+      // so the user sees their previous results on reload/back-forward.
+      const searchQuery = params.get('search')
+      const searchType = params.get('type') as MediaType | null
+      if (searchQuery) {
+        // Type is already initialized from URL via useState initializer,
+        // so we just need to trigger the search.
+        // Use a slight delay to ensure state is settled.
+        setTimeout(() => onSubmit(), 0)
+      }
+      void searchType
     }
   }, [])
 
@@ -792,6 +814,12 @@ export default function Home() {
       e?.preventDefault()
       const q = query.trim()
       if (!q) return
+      // Update URL with search params (so reload/back-forward preserves state)
+      const searchUrl = new URL(window.location.href)
+      searchUrl.searchParams.set('search', q)
+      searchUrl.searchParams.set('type', mediaType)
+      searchUrl.searchParams.delete('view') // clear detail view if present
+      window.history.pushState({ view: 'search', query: q, type: mediaType }, '', searchUrl.toString())
       setLoading(true)
       setError(null)
       setResults(null)
@@ -944,6 +972,7 @@ export default function Home() {
 
   // Listen for browser back/forward — when the URL no longer has
   // view=details, clear the detail state so we return to the search page.
+  // Also restore search query/type from URL on back/forward navigation.
   useEffect(() => {
     const onPopState = () => {
       const params = new URLSearchParams(window.location.search)
@@ -962,11 +991,22 @@ export default function Home() {
         setManualWatchLinks([])
     setTmdbId(null)
     setTmdbIdError(null)
+        // Restore search query/type from URL (if present)
+        const sq = params.get('search') ?? ''
+        const st = params.get('type') as MediaType | null
+        if (sq !== query) setQuery(sq)
+        if (st && (st === 'movie' || st === 'series') && st !== mediaType) setMediaType(st)
+        // If there's a search query, re-run the search to show results
+        if (sq) {
+          setTimeout(() => onSubmit(), 0)
+        } else {
+          setResults(null)
+        }
       }
     }
     window.addEventListener('popstate', onPopState)
     return () => window.removeEventListener('popstate', onPopState)
-  }, [])
+  }, [query, mediaType, onSubmit])
 
   // Toggle a season's expanded/collapsed state
   const toggleSeason = useCallback((seasonId: number) => {
