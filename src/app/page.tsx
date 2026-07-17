@@ -3550,6 +3550,25 @@ function ManualStreamLinks({
     }
   }
 
+  const [clearingAll, setClearingAll] = useState(false)
+  async function handleClearAll() {
+    if (!confirm(`Delete all ${urls.length} stream URLs?`)) return
+    setClearingAll(true)
+    try {
+      const url = `/api/manual-link?mediaId=${encodeURIComponent(mediaId)}&mediaType=${mediaType}`
+      const res = await fetch(url, { method: 'DELETE' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Clear all failed')
+      toast.success(`Cleared ${data.deleted} stream URL(s)`)
+      onDeleted?.()
+      setTimeout(() => window.location.reload(), 500)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to clear all')
+    } finally {
+      setClearingAll(false)
+    }
+  }
+
   function qualityColor(quality: string): string {
     if (quality === '4K' || quality === '8K') return 'border-fuchsia-600/50 bg-fuchsia-950/30 text-fuchsia-300'
     if (quality === '2160p') return 'border-purple-600/50 bg-purple-950/30 text-purple-300'
@@ -3571,6 +3590,19 @@ function ManualStreamLinks({
         <Badge variant="outline" className="border-emerald-700/50 text-emerald-300 bg-emerald-950/30 text-xs">
           <Check className="w-3 h-3 mr-1" /> Stored · 7-day TTL
         </Badge>
+        <button
+          onClick={handleClearAll}
+          disabled={clearingAll}
+          className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-red-900/40 hover:bg-red-800/50 text-red-300 text-xs font-medium transition-colors disabled:opacity-50"
+          title="Delete all stream URLs for this movie"
+        >
+          {clearingAll ? (
+            <Loader2 className="w-3 h-3 animate-spin" />
+          ) : (
+            <Trash2 className="w-3 h-3" />
+          )}
+          Clear All
+        </button>
       </div>
 
       <div className="space-y-2">
@@ -3980,6 +4012,24 @@ function EpisodeManualUrlsList({
     }
   }
 
+  const [clearingAll, setClearingAll] = useState(false)
+  async function handleClearAll() {
+    if (!confirm(`Delete all ${urls.length} stream URLs for this episode?`)) return
+    setClearingAll(true)
+    try {
+      const url = `/api/manual-link?mediaId=${encodeURIComponent(mediaId)}&mediaType=${mediaType}&episodeId=${encodeURIComponent(String(episode.id))}`
+      const res = await fetch(url, { method: 'DELETE' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Clear all failed')
+      toast.success(`Cleared ${data.deleted} stream URL(s)`)
+      setTimeout(() => window.location.reload(), 500)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to clear all')
+    } finally {
+      setClearingAll(false)
+    }
+  }
+
   function qualityColor(quality: string): string {
     if (quality === '4K' || quality === '8K') return 'border-fuchsia-600/50 bg-fuchsia-950/30 text-fuchsia-300'
     if (quality === '2160p') return 'border-purple-600/50 bg-purple-950/30 text-purple-300'
@@ -3998,6 +4048,19 @@ function EpisodeManualUrlsList({
         <Badge variant="outline" className="border-emerald-700/50 text-emerald-300 text-[10px] px-1 py-0">
           {urls.length}
         </Badge>
+        <button
+          onClick={handleClearAll}
+          disabled={clearingAll}
+          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-red-900/40 hover:bg-red-800/50 text-red-300 text-[10px] font-medium transition-colors disabled:opacity-50 ml-auto"
+          title="Delete all stream URLs for this episode"
+        >
+          {clearingAll ? (
+            <Loader2 className="w-2.5 h-2.5 animate-spin" />
+          ) : (
+            <Trash2 className="w-2.5 h-2.5" />
+          )}
+          Clear All
+        </button>
       </div>
       <div className="space-y-1">
         {urls.map((entry, i) => {
