@@ -308,38 +308,29 @@ function manualStreamUrlsToLinks(
   const watchLinks: ParsedWatchLink[] = []
 
   // Group URLs by host so each host gets sequential Server N numbering.
-  // e.g. 3 cmreel URLs → Server 1, Server 2, Server 3 (all cmreel)
-  //      2 bioscopeapp URLs → Server 1, Server 2 (all bioscopeapp)
-  // If only one host is present, numbering is sequential across all URLs.
-  const hostCounts: Record<string, number> = {}
+  // e.g. cmreel URLs → Server 1 (all cmreel)
+  //      bioscopeapp URLs → Server 2 (all bioscopeapp)
+  //      cmdrive URLs → Server 3 (all cmdrive)
+  // Same host = same Server N (regardless of quality).
+  const hostOrder: string[] = []
   for (const entry of urls) {
-    hostCounts[entry.host] = (hostCounts[entry.host] ?? 0) + 1
-  }
-  const hostCounters: Record<string, number> = {}
-  const uniqueHosts = Object.keys(hostCounts)
-  const useGlobalNumbering = uniqueHosts.length === 1
-
-  let globalIdx = 0
-  for (const entry of urls) {
-    let serverNumber: number
-    if (useGlobalNumbering) {
-      globalIdx++
-      serverNumber = globalIdx
-    } else {
-      hostCounters[entry.host] = (hostCounters[entry.host] ?? 0) + 1
-      serverNumber = hostCounters[entry.host]
+    if (!hostOrder.includes(entry.host)) {
+      hostOrder.push(entry.host)
     }
-    const qualityLabel = entry.quality === 'STD' ? '' : ` (${entry.quality})`
+  }
+
+  for (const entry of urls) {
+    const serverNumber = hostOrder.indexOf(entry.host) + 1
 
     downloadLinks.push({
-      serverName: `Server ${serverNumber}${qualityLabel} - Download`,
+      serverName: `Server ${serverNumber}`,
       url: entry.streamUrl, // ← real stream URL (not shortlink)
       size: 'N/A',
       quality: entry.quality,
       fileName: entry.fileName,
     })
     watchLinks.push({
-      serverName: `Server ${serverNumber}${qualityLabel} - Stream`,
+      serverName: `Server ${serverNumber}`,
       url: entry.streamUrl, // ← real stream URL (not shortlink)
       size: 'N/A',
       quality: entry.quality,
