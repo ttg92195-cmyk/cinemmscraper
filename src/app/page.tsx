@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
-import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight, ArrowLeft, KeyRound, Settings, Plus, Zap, ChevronLeft, Send, Upload, Trash2 } from 'lucide-react'
+import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight, ArrowLeft, KeyRound, Settings, Plus, Zap, ChevronLeft, Send, Upload, Trash2, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -3492,6 +3492,30 @@ function ManualStreamLinks({
 }) {
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
   const [deleting, setDeleting] = useState<number | null>(null)
+  const [refreshing, setRefreshing] = useState<number | null>(null)
+
+  async function handleRefresh(shortlink: string, idx: number) {
+    setRefreshing(idx)
+    try {
+      const res = await fetch('/api/manual-link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mediaId, mediaType, shortlinks: [shortlink] }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Refresh failed')
+      if (data.stored > 0) {
+        toast.success('Stream URL updated (file size refreshed)')
+        setTimeout(() => window.location.reload(), 500)
+      } else {
+        toast.error('Update failed — shortlink may be expired')
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to refresh')
+    } finally {
+      setRefreshing(null)
+    }
+  }
 
   async function copyToClipboard(text: string, idx: number, type: 'shortlink' | 'streamUrl') {
     try {
@@ -3633,8 +3657,20 @@ function ManualStreamLinks({
                   Open Stream
                 </a>
                 <button
+                  onClick={() => handleRefresh(entry.shortlink, i)}
+                  disabled={refreshing === i || isDeleting}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-blue-900/40 hover:bg-blue-800/50 text-blue-300 text-xs font-medium transition-colors disabled:opacity-50"
+                  title="Update (re-resolve shortlink + refresh file size)"
+                >
+                  {refreshing === i ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="w-3.5 h-3.5" />
+                  )}
+                </button>
+                <button
                   onClick={() => handleDelete(entry.shortlink, i)}
-                  disabled={isDeleting}
+                  disabled={isDeleting || refreshing === i}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-red-900/40 hover:bg-red-800/50 text-red-300 text-xs font-medium transition-colors ml-auto disabled:opacity-50"
                   title="Delete this stream URL"
                 >
@@ -3882,6 +3918,35 @@ function EpisodeManualUrlsList({
 }) {
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
   const [deletingIdx, setDeletingIdx] = useState<number | null>(null)
+  const [refreshingIdx, setRefreshingIdx] = useState<number | null>(null)
+
+  async function handleRefresh(shortlink: string, idx: number) {
+    setRefreshingIdx(idx)
+    try {
+      const res = await fetch('/api/manual-link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mediaId,
+          mediaType,
+          episodeId: String(episode.id),
+          shortlinks: [shortlink],
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Refresh failed')
+      if (data.stored > 0) {
+        toast.success('Stream URL updated (file size refreshed)')
+        setTimeout(() => window.location.reload(), 500)
+      } else {
+        toast.error('Update failed — shortlink may be expired')
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to refresh')
+    } finally {
+      setRefreshingIdx(null)
+    }
+  }
 
   async function copyToClipboard(text: string, idx: number) {
     try {
@@ -3988,8 +4053,20 @@ function EpisodeManualUrlsList({
                   Open
                 </a>
                 <button
+                  onClick={() => handleRefresh(entry.shortlink, i)}
+                  disabled={refreshingIdx === i || isDeleting}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-900/40 hover:bg-blue-800/50 text-blue-300 text-[10px] font-medium transition-colors disabled:opacity-50"
+                  title="Update (re-resolve + refresh file size)"
+                >
+                  {refreshingIdx === i ? (
+                    <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="w-2.5 h-2.5" />
+                  )}
+                </button>
+                <button
                   onClick={() => handleDelete(entry.shortlink, i)}
-                  disabled={isDeleting}
+                  disabled={isDeleting || refreshingIdx === i}
                   className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-red-900/40 hover:bg-red-800/50 text-red-300 text-[10px] font-medium transition-colors ml-auto disabled:opacity-50"
                   title="Delete this stream URL"
                 >
