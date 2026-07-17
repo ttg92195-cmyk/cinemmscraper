@@ -85,6 +85,7 @@ export async function GET(req: NextRequest) {
           format: e.format,
           host: e.host,
           fileName: e.fileName,
+          fileSize: e.fileSize,
           createdAt: e.createdAt.toISOString(),
           expiresAt: e.expiresAt.toISOString(),
         }))

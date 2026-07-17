@@ -100,6 +100,7 @@ export async function ensureSchema(): Promise<void> {
         "format" TEXT NOT NULL,
         "host" TEXT NOT NULL,
         "fileName" TEXT NOT NULL,
+        "fileSize" TEXT NOT NULL DEFAULT 'N/A',
         "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         "expiresAt" DATETIME NOT NULL
       )
@@ -117,6 +118,12 @@ export async function ensureSchema(): Promise<void> {
       console.log('[db] Migrating ManualStreamUrl: adding episodeId column')
       await db.$executeRawUnsafe(`
         ALTER TABLE "ManualStreamUrl" ADD COLUMN "episodeId" TEXT
+      `)
+    }
+    if (!columnNames.includes('fileSize')) {
+      console.log('[db] Migrating ManualStreamUrl: adding fileSize column')
+      await db.$executeRawUnsafe(`
+        ALTER TABLE "ManualStreamUrl" ADD COLUMN "fileSize" TEXT NOT NULL DEFAULT 'N/A'
       `)
     }
 

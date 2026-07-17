@@ -128,6 +128,7 @@ interface ManualStreamUrlEntry {
   format: string
   host: string
   fileName: string
+  fileSize: string
   createdAt: string
   expiresAt: string
 }
@@ -325,14 +326,14 @@ function manualStreamUrlsToLinks(
     downloadLinks.push({
       serverName: `Server ${serverNumber}`,
       url: entry.streamUrl, // ← real stream URL (not shortlink)
-      size: 'N/A',
+      size: entry.fileSize || 'N/A',
       quality: entry.quality,
       fileName: entry.fileName,
     })
     watchLinks.push({
       serverName: `Server ${serverNumber}`,
       url: entry.streamUrl, // ← real stream URL (not shortlink)
-      size: 'N/A',
+      size: entry.fileSize || 'N/A',
       quality: entry.quality,
     })
   }
@@ -3570,6 +3571,11 @@ function ManualStreamLinks({
                 <Badge variant="outline" className="border-zinc-700 text-zinc-500 text-xs">
                   {entry.host}
                 </Badge>
+                {entry.fileSize && entry.fileSize !== 'N/A' && (
+                  <Badge variant="outline" className="border-amber-800/40 bg-amber-950/20 text-amber-300 text-xs">
+                    {entry.fileSize}
+                  </Badge>
+                )}
                 <div className="ml-auto text-xs text-zinc-500 truncate max-w-full">
                   {entry.fileName}
                 </div>
@@ -3946,6 +3952,11 @@ function EpisodeManualUrlsList({
                 <Badge variant="outline" className="border-zinc-700 text-zinc-500 text-[10px] px-1 py-0">
                   {entry.host.split('.')[0]}
                 </Badge>
+                {entry.fileSize && entry.fileSize !== 'N/A' && (
+                  <Badge variant="outline" className="border-amber-800/40 bg-amber-950/20 text-amber-300 text-[10px] px-1 py-0">
+                    {entry.fileSize}
+                  </Badge>
+                )}
                 <div className="ml-auto text-[10px] text-zinc-500 truncate max-w-[60%]">
                   {entry.fileName}
                 </div>

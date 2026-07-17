@@ -60,6 +60,7 @@ model ManualStreamUrl {
   format     String   // 'MKV' | 'MP4' | 'AVI' | '' (empty if unknown)
   host       String   // hostname of streamUrl (e.g. 'cmappsecond8.cmdrive.xyz')
   fileName   String   // last path segment of streamUrl, URL-decoded
+  fileSize   String   // human-readable file size (e.g. '290.5 MB', '1.2 GB', 'N/A')
   createdAt  DateTime @default(now())
   expiresAt  DateTime // 7 days from createdAt
 

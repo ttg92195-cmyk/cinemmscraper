@@ -56,6 +56,7 @@ interface SubmitResult {
   format?: string
   host?: string
   fileName?: string
+  fileSize?: string
   stored: boolean
   error?: string
 }
@@ -87,6 +88,45 @@ function parseFileName(url: string): string {
   } catch {
     return ''
   }
+}
+
+/**
+ * Fetch the file size of a stream URL via HEAD request.
+ * Returns human-readable string like "290.5 MB", "1.2 GB", or "N/A".
+ *
+ * Most CDN hosts (cmreel.com, bioscopeapp.com) respond to HEAD with
+ * Content-Length. Some hosts (cmdrive.xyz) return 403 on HEAD — for those
+ * we return "N/A".
+ */
+async function fetchFileSize(streamUrl: string): Promise<string> {
+  try {
+    const res = await fetch(streamUrl, {
+      method: 'HEAD',
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        Accept: '*/*',
+      },
+      signal: AbortSignal.timeout(10000),
+    })
+    const contentLength = res.headers.get('content-length')
+    if (contentLength) {
+      const bytes = parseInt(contentLength, 10)
+      if (Number.isFinite(bytes) && bytes > 0) {
+        return formatBytes(bytes)
+      }
+    }
+    return 'N/A'
+  } catch {
+    return 'N/A'
+  }
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
 }
 
 export async function POST(req: NextRequest) {
@@ -199,6 +239,9 @@ export async function POST(req: NextRequest) {
       const host = parseHost(streamUrl)
       const fileName = parseFileName(streamUrl)
 
+      // Fetch file size via HEAD request (may fail for some hosts → "N/A")
+      const fileSize = await fetchFileSize(streamUrl)
+
       // No expiry — store permanently (Bro wants URLs to persist forever).
       // Previously this was 7-day TTL, but Bro requested permanent storage.
       // We use year 9999 as "never expires" (SQLite handles this fine).
@@ -221,6 +264,7 @@ export async function POST(req: NextRequest) {
               format,
               host,
               fileName,
+              fileSize,
               expiresAt,
             },
           })
@@ -236,6 +280,7 @@ export async function POST(req: NextRequest) {
               format,
               host,
               fileName,
+              fileSize,
               expiresAt,
             },
           })
@@ -248,6 +293,7 @@ export async function POST(req: NextRequest) {
           format,
           host,
           fileName,
+          fileSize,
           stored: true,
         })
       } catch (dbErr) {
@@ -342,6 +388,7 @@ export async function GET(req: NextRequest) {
       format: e.format,
       host: e.host,
       fileName: e.fileName,
+      fileSize: e.fileSize,
       createdAt: e.createdAt,
       expiresAt: e.expiresAt,
     })),
