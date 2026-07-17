@@ -306,22 +306,40 @@ function manualStreamUrlsToLinks(
 ): { downloadLinks: ParsedDownloadLink[]; watchLinks: ParsedWatchLink[] } {
   const downloadLinks: ParsedDownloadLink[] = []
   const watchLinks: ParsedWatchLink[] = []
+
+  // Group URLs by host so each host gets sequential Server N numbering.
+  // e.g. 3 cmreel URLs → Server 1, Server 2, Server 3 (all cmreel)
+  //      2 bioscopeapp URLs → Server 1, Server 2 (all bioscopeapp)
+  // If only one host is present, numbering is sequential across all URLs.
+  const hostCounts: Record<string, number> = {}
   for (const entry of urls) {
-    // Derive a friendly server name from the host (e.g. "stream.cmreel.com" → "Cmreel")
-    const hostFirstSegment = entry.host.split('.')[0].replace(/^stream\.?/, '') || entry.host
-    const capitalizedName =
-      hostFirstSegment.charAt(0).toUpperCase() + hostFirstSegment.slice(1)
+    hostCounts[entry.host] = (hostCounts[entry.host] ?? 0) + 1
+  }
+  const hostCounters: Record<string, number> = {}
+  const uniqueHosts = Object.keys(hostCounts)
+  const useGlobalNumbering = uniqueHosts.length === 1
+
+  let globalIdx = 0
+  for (const entry of urls) {
+    let serverNumber: number
+    if (useGlobalNumbering) {
+      globalIdx++
+      serverNumber = globalIdx
+    } else {
+      hostCounters[entry.host] = (hostCounters[entry.host] ?? 0) + 1
+      serverNumber = hostCounters[entry.host]
+    }
     const qualityLabel = entry.quality === 'STD' ? '' : ` (${entry.quality})`
 
     downloadLinks.push({
-      serverName: `${capitalizedName}${qualityLabel} - Download`,
+      serverName: `Server ${serverNumber}${qualityLabel} - Download`,
       url: entry.streamUrl, // ← real stream URL (not shortlink)
       size: 'N/A',
       quality: entry.quality,
       fileName: entry.fileName,
     })
     watchLinks.push({
-      serverName: `${capitalizedName}${qualityLabel} - Stream`,
+      serverName: `Server ${serverNumber}${qualityLabel} - Stream`,
       url: entry.streamUrl, // ← real stream URL (not shortlink)
       size: 'N/A',
       quality: entry.quality,
