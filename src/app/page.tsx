@@ -3508,7 +3508,9 @@ function ManualStreamLinks({
         toast.success('Stream URL updated (file size refreshed)')
         setTimeout(() => window.location.reload(), 500)
       } else {
-        toast.error('Update failed — shortlink may be expired')
+        // Update failed — shortlink expired. Show the actual error reason.
+        const reason = data.results?.[0]?.error ?? 'shortlink may be expired'
+        toast.error(`Update failed: ${reason}`, { duration: 6000 })
       }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Failed to refresh')
@@ -3939,7 +3941,8 @@ function EpisodeManualUrlsList({
         toast.success('Stream URL updated (file size refreshed)')
         setTimeout(() => window.location.reload(), 500)
       } else {
-        toast.error('Update failed — shortlink may be expired')
+        const reason = data.results?.[0]?.error ?? 'shortlink may be expired'
+        toast.error(`Update failed: ${reason}`, { duration: 6000 })
       }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Failed to refresh')
