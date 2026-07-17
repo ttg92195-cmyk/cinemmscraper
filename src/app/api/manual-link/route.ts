@@ -199,9 +199,10 @@ export async function POST(req: NextRequest) {
       const host = parseHost(streamUrl)
       const fileName = parseFileName(streamUrl)
 
-      // Calculate expiry
-      const expiresAt = new Date()
-      expiresAt.setDate(expiresAt.getDate() + TTL_DAYS)
+      // No expiry — store permanently (Bro wants URLs to persist forever).
+      // Previously this was 7-day TTL, but Bro requested permanent storage.
+      // We use year 9999 as "never expires" (SQLite handles this fine).
+      const expiresAt = new Date('9999-12-31T23:59:59.000Z')
 
       // Upsert into DB — if the same shortlink already exists for this media+episode,
       // update it (refresh TTL + metadata); otherwise insert new.

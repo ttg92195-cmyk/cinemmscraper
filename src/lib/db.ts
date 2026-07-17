@@ -142,6 +142,20 @@ export async function ensureSchema(): Promise<void> {
       )
     `)
 
+    // MIGRATION: Update all existing ManualStreamUrl entries to have
+    // permanent expiry (year 9999). Previously they had 7-day TTL.
+    // Bro requested permanent storage — no URLs should ever expire.
+    try {
+      const farFuture = new Date('9999-12-31T23:59:59.000Z')
+      await db.$executeRawUnsafe(
+        `UPDATE "ManualStreamUrl" SET "expiresAt" = ? WHERE "expiresAt" < ?`,
+        farFuture.toISOString(),
+        farFuture.toISOString(),
+      )
+    } catch {
+      // Migration failed (e.g. table doesn't exist yet) — ignore, will retry next time
+    }
+
     console.log('[db] Schema ensured — all tables and columns exist')
   } catch (e) {
     console.error('[db] ensureSchema failed:', e instanceof Error ? e.message : e)
