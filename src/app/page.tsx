@@ -732,6 +732,33 @@ export default function Home() {
     }
   }, [])
 
+  // When view=details is in the URL on initial load, we also need to
+  // re-run the search so the prev/next navigation buttons work (they
+  // depend on `results` being populated). We do this AFTER opening
+  // the detail view, so the detail content shows immediately.
+  // The search runs in the background and populates `results`.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('view') === 'details' && params.get('search')) {
+      // Don't change the URL (we're already on the detail view) — just fetch
+      // results in the background so prev/next buttons appear.
+      const q = params.get('search') ?? ''
+      const t = (params.get('type') as MediaType) ?? 'movie'
+      ;(async () => {
+        try {
+          const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&type=${t}`)
+          const data = await res.json()
+          if (res.ok && Array.isArray(data.items)) {
+            setResults(data.items)
+            setCachedSearch(!!data.cached)
+          }
+        } catch {
+          // Background fetch failed — prev/next just won't show, that's OK
+        }
+      })()
+    }
+  }, [])
+
   const addVisitorUuid = useCallback(() => {
     const trimmed = uuidInput.trim()
     if (!trimmed) return
@@ -871,6 +898,8 @@ export default function Home() {
     setTmdbId(null)
     setTmdbIdError(null)
     // Push URL state so the browser back button returns to search results.
+    // Also keep ?search=...&type=... so refresh/back-forward can restore
+    // the search results (needed for prev/next navigation buttons).
     const detailUrl = new URL(window.location.href)
     detailUrl.searchParams.set('view', 'details')
     detailUrl.searchParams.set('id', String(item.id))
@@ -879,6 +908,11 @@ export default function Home() {
     detailUrl.searchParams.set('name', item.name)
     detailUrl.searchParams.set('year', item.year)
     detailUrl.searchParams.set('poster', item.poster)
+    // Preserve the search query so we can re-run the search on reload
+    // (this enables prev/next buttons to work after refresh).
+    if (query) {
+      detailUrl.searchParams.set('search', query)
+    }
     window.history.pushState({ view: 'details', itemId: item.id }, '', detailUrl.toString())
     window.scrollTo(0, 0)
     try {
@@ -945,7 +979,7 @@ export default function Home() {
     } finally {
       setDetailsLoading(false)
     }
-  }, [tmdbApiKey])
+  }, [tmdbApiKey, query])
 
   const closeDetails = useCallback(() => {
     // Clear all detail-related state immediately so one click on "Back to
