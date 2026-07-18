@@ -237,7 +237,7 @@ function parseRsc(text: string): Map<string, string> {
 async function callAction(
   actionId: string,
   args: unknown[],
-  opts: { retries?: number; visitorUuid?: string | null } = {},
+  opts: { retries?: number; visitorUuid?: string | null; useProxy?: boolean } = {},
 ): Promise<{ lines: Map<string, string>; raw: string }> {
   const retries = opts.retries ?? 1
   let lastError: unknown = null
@@ -248,18 +248,26 @@ async function callAction(
         ...COMMON_HEADERS,
         'Next-Action': actionId,
       }
-      // When the user supplies their own cinemm.com visitor UUID, send it
-      // as a cookie. cinemm.com tracks quota per UUID, so using a known-good
-      // UUID (minted via cinemm.com directly) bypasses our auto-refresh logic
-      // and its IP rate-limiting side effects.
       if (opts.visitorUuid) {
         headers['Cookie'] = `user_uuid=${opts.visitorUuid}`
       }
-      const res = await fetch(CINEMM_ORIGIN + '/', {
-        method: 'POST',
-        headers,
-        body,
-      })
+
+      // If useProxy is requested, fetch the proxy config from cache and use it
+      let fetchOptions: RequestInit = { method: 'POST', headers, body }
+      if (opts.useProxy) {
+        const proxyConfig = await getCache<{ proxy: string }>('proxy:config')
+        if (proxyConfig?.proxy) {
+          try {
+            const { ProxyAgent } = require('undici')
+            const agent = new ProxyAgent(proxyConfig.proxy)
+            fetchOptions = { ...fetchOptions, dispatcher: agent } as any
+          } catch {
+            // Proxy agent not available — fall back to direct
+          }
+        }
+      }
+
+      const res = await fetch(CINEMM_ORIGIN + '/', fetchOptions)
       if (!res.ok) {
         throw new Error(`cinemm.com action ${actionId} failed: HTTP ${res.status}`)
       }
@@ -267,7 +275,6 @@ async function callAction(
       return { lines: parseRsc(text), raw: text }
     } catch (e) {
       lastError = e
-      // Brief backoff before retry
       if (attempt < retries) await new Promise((r) => setTimeout(r, 500))
     }
   }
@@ -647,23 +654,22 @@ export async function getMovieDetails(
     }
     
     // Also call getMovieSourcesAction for servers — returns { ok, access, servers }
-    // NEW (2026-07-15+): getMovieSourcesAction takes a SINGLE arg (the media ID),
-    // not (id, source). Discovered from page-f46752db4105891f.js:
-    //   let t = "movie"===l ? await j(i) : await N(i, Number(n));
-    // where j = getMovieSourcesAction, i = sourceId, n = seriesId
+    // NEW: use proxy if configured — Myanmar IP returns access:"direct" with real URLs
     try {
-      const { lines: sourceLines } = await callAction(ACTIONS.getMovieSources, [id])
+      const { lines: sourceLines } = await callAction(ACTIONS.getMovieSources, [id], { useProxy: true })
       const sourceRaw = sourceLines.get('1')
       if (sourceRaw) {
         const sourceParsed = JSON.parse(sourceRaw) as {
           servers?: CinemmServer[]
           access?: string
         }
+        // If proxy is a Myanmar IP, access will be "direct" and servers will have URLs
         if (sourceParsed.servers && sourceParsed.servers.length > 0) {
           result.servers = sourceParsed.servers.map((s) => ({
             ...s,
             size: s.size ?? 'N/A',
           }))
+          console.log(`[cinemm] getMovieSources returned ${result.servers.length} servers (access: ${sourceParsed.access})`)
         }
       }
     } catch {

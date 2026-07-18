@@ -570,6 +570,17 @@ export default function Home() {
   const [visitorUuids, setVisitorUuids] = useState<string[]>([])
   const [activeUuidIndex, setActiveUuidIndex] = useState(0)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // Myanmar proxy state
+  const [proxyInput, setProxyInput] = useState('')
+  const [proxyStatus, setProxyStatus] = useState<{
+    configured: boolean
+    proxy: string | null
+    lastTested?: string | null
+    lastTestOk?: boolean | null
+    lastTestResult?: string | null
+  } | null>(null)
+  const [proxyTesting, setProxyTesting] = useState(false)
+  const [proxyTestResult, setProxyTestResult] = useState<{ ok: boolean; result?: string; error?: string } | null>(null)
   const [uuidInput, setUuidInput] = useState('')
 
   // Remaining quota on cinemm.com (from the last detail/episode fetch).
@@ -845,6 +856,67 @@ export default function Home() {
     setTgBotInput('')
     toast.info('Telegram Bot URL cleared')
   }, [])
+
+  // ===== Myanmar Proxy handlers =====
+  const fetchProxyStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/proxy-config')
+      if (res.ok) setProxyStatus(await res.json())
+    } catch {}
+  }, [])
+
+  const saveProxy = useCallback(async () => {
+    const trimmed = proxyInput.trim()
+    if (!trimmed) return
+    try {
+      const res = await fetch('/api/proxy-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ proxy: trimmed }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Save failed')
+      toast.success('Proxy saved! Click "Test" to verify.')
+      setProxyInput('')
+      await fetchProxyStatus()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to save proxy')
+    }
+  }, [proxyInput, fetchProxyStatus])
+
+  const testProxy = useCallback(async () => {
+    setProxyTesting(true)
+    setProxyTestResult(null)
+    try {
+      const res = await fetch('/api/proxy-config?action=test', { method: 'POST' })
+      const data = await res.json()
+      setProxyTestResult(data)
+      if (data.ok) {
+        toast.success('Proxy works! Stream URLs will auto-fetch.')
+      } else {
+        toast.error(data.error || data.result || 'Proxy test failed')
+      }
+      await fetchProxyStatus()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Test failed')
+    } finally {
+      setProxyTesting(false)
+    }
+  }, [fetchProxyStatus])
+
+  const clearProxy = useCallback(async () => {
+    try {
+      await fetch('/api/proxy-config', { method: 'DELETE' })
+      toast.info('Proxy cleared')
+      setProxyTestResult(null)
+      await fetchProxyStatus()
+    } catch {
+      toast.error('Failed to clear proxy')
+    }
+  }, [fetchProxyStatus])
+
+  // Fetch proxy status on mount
+  useEffect(() => { fetchProxyStatus() }, [fetchProxyStatus])
 
   const onSubmit = useCallback(
     async (e?: React.FormEvent) => {
@@ -1539,6 +1611,90 @@ export default function Home() {
                   )}
                 </p>
               </div>
+            </div>
+
+            {/* Myanmar Proxy section */}
+            <div className="border border-cyan-900/40 bg-cyan-950/10 rounded-lg p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <Zap className="w-4 h-4 text-cyan-400" />
+                  <h4 className="text-sm font-semibold text-zinc-100">Myanmar Proxy (Auto-Fetch Stream URLs)</h4>
+                  {proxyStatus?.configured && (
+                    <Badge variant="outline" className="border-cyan-700/50 text-cyan-300 text-xs">
+                      Active
+                    </Badge>
+                  )}
+                </div>
+                {proxyStatus?.configured && (
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={testProxy}
+                      disabled={proxyTesting}
+                      className="bg-zinc-900 border-zinc-700 hover:bg-zinc-800 text-zinc-100 text-xs"
+                    >
+                      {proxyTesting ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <RefreshCw className="w-3 h-3 mr-1" />}
+                      Test
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={clearProxy}
+                      className="bg-zinc-900 border-zinc-700 hover:bg-zinc-800 text-red-400 text-xs"
+                    >
+                      Clear
+                    </Button>
+                  </div>
+                )}
+              </div>
+              {proxyStatus?.configured ? (
+                <div className="text-xs space-y-1">
+                  <div className="text-cyan-300 font-mono break-all">{proxyStatus.proxy}</div>
+                  {proxyStatus.lastTested && (
+                    <div className="text-zinc-500">
+                      Last tested: {new Date(proxyStatus.lastTested).toLocaleString()}
+                      {proxyStatus.lastTestOk !== null && (
+                        <span className={proxyStatus.lastTestOk ? ' text-emerald-400 ml-1' : ' text-red-400 ml-1'}>
+                          → {proxyStatus.lastTestOk ? '✅ OK' : '❌ Failed'}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {proxyTestResult && (
+                    <div className={`text-xs p-2 rounded border ${
+                      proxyTestResult.ok ? 'border-emerald-800/50 bg-emerald-950/20 text-emerald-300' : 'border-red-800/50 bg-red-950/20 text-red-300'
+                    }`}>
+                      {proxyTestResult.result || proxyTestResult.error}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <>
+                  <p className="text-xs text-zinc-400 leading-relaxed">
+                    Run <a href="https://play.google.com/store/apps/details?id=com.guim.everyproxy" target="_blank" rel="noopener noreferrer" className="text-cyan-400 hover:text-cyan-300 underline">Every Proxy</a> on your phone (with Myanmar VPN active),
+                    then paste the HTTP proxy address below. The server will route cinemm.com requests through it to get real stream URLs.
+                  </p>
+                  <div className="flex gap-2">
+                    <Input
+                      type="text"
+                      placeholder="http://192.168.1.5:8080"
+                      value={proxyInput}
+                      onChange={(e) => setProxyInput(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); saveProxy() } }}
+                      className="bg-zinc-950 border-zinc-700 text-zinc-100 placeholder:text-zinc-600 focus-visible:ring-cyan-500 font-mono text-sm"
+                    />
+                    <Button
+                      size="sm"
+                      onClick={saveProxy}
+                      disabled={!proxyInput.trim()}
+                      className="bg-cyan-600 hover:bg-cyan-500 text-white"
+                    >
+                      Save
+                    </Button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         )}
