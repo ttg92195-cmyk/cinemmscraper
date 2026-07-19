@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getEpisodeServers } from '@/lib/cinemm'
 import { db, ensureSchema } from '@/lib/db'
+import { sortStreamUrlsByHostPreference } from '@/lib/stream-url-sort'
 
 export const runtime = 'nodejs'
 export const maxDuration = 30
@@ -78,7 +79,9 @@ export async function GET(req: NextRequest) {
           },
           orderBy: { createdAt: 'desc' },
         })
-        manualStreamUrls = entries.map((e) => ({
+        // Sort by Bro's preferred host order: cmreel → bioscopeapp → cmappfirst → cmappsecond → other
+        const sorted = sortStreamUrlsByHostPreference(entries)
+        manualStreamUrls = sorted.map((e) => ({
           shortlink: e.shortlink,
           streamUrl: e.streamUrl,
           quality: e.quality,

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db, ensureSchema } from '@/lib/db'
+import { sortStreamUrlsByHostPreference } from '@/lib/stream-url-sort'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -389,12 +390,21 @@ export async function GET(req: NextRequest) {
     where: { ...where, expiresAt: { lte: now } },
   }).catch(() => {}) // fire-and-forget
 
+  // Sort entries by preferred host order:
+  //   1. stream.cmreel.com         (best — fast, reliable)
+  //   2. stream.bioscopeapp.com
+  //   3. cmappfirst*.cmdrive.xyz   (slow but available)
+  //   4. cmappsecond*.cmdrive.xyz
+  //   5. everything else (alphabetical)
+  // Within each host group, preserve createdAt desc (newest first).
+  const sortedEntries = sortStreamUrlsByHostPreference(entries)
+
   return NextResponse.json({
     mediaId,
     mediaType,
     episodeId: episodeId ?? null,
-    count: entries.length,
-    manualStreamUrls: entries.map((e) => ({
+    count: sortedEntries.length,
+    manualStreamUrls: sortedEntries.map((e) => ({
       shortlink: e.shortlink,
       streamUrl: e.streamUrl,
       quality: e.quality,
