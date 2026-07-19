@@ -303,11 +303,14 @@ async function getSeriesDetails(id) {
 // Get episode sources (returns stream URLs for a specific episode)
 // ---------------------------------------------------------------------------
 
-async function getEpisodeSources(episodeId) {
+async function getEpisodeSources(episodeId, episodeNumber) {
   // getEpisodeSourcesAction expects (episodeId: number, episodeNumber: number)
-  // We only have episodeId here — pass it as a number.
+  // Both args must be NUMBERS, not strings. Confirmed by cinemm.com bundle code:
+  //   await N(i, Number(n))
+  // where i = episodeId (number) and n = episodeNumber (number)
   const numericEpId = typeof episodeId === 'string' ? parseInt(episodeId, 10) : episodeId
-  const { lines } = await callAction(ACTIONS.getEpisodeSources, [numericEpId])
+  const numericEpNum = typeof episodeNumber === 'string' ? parseInt(episodeNumber, 10) : (episodeNumber || 1)
+  const { lines } = await callAction(ACTIONS.getEpisodeSources, [numericEpId, numericEpNum])
   const raw = lines.get('1')
   if (!raw) return null
   try {
@@ -333,12 +336,40 @@ async function submitToRailway(mediaId, mediaType, episodeId, streamUrls) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(60000), // server may HEAD each URL for size
+    signal: AbortSignal.timeout(90000), // increased to 90s — server may HEAD each URL
   })
   if (!res.ok) {
     throw new Error(`Railway HTTP ${res.status}: ${await res.text()}`)
   }
   return res.json()
+}
+
+/**
+ * Submit to Railway with retry on HTTP 502 (cold start) or network errors.
+ * Railway's free tier can take 30+ seconds to wake up on first request,
+ * causing 502 errors. We retry up to 3 times with 10s, 20s, 30s delays.
+ */
+async function submitToRailwayWithRetry(mediaId, mediaType, episodeId, streamUrls) {
+  const retryDelays = [10000, 20000, 30000] // 10s, 20s, 30s
+  let lastError = null
+  for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
+    try {
+      return await submitToRailway(mediaId, mediaType, episodeId, streamUrls)
+    } catch (e) {
+      lastError = e
+      const msg = e.message || ''
+      // Retry on HTTP 502 (cold start), 503, 504, or network errors
+      const isRetryable = /HTTP 5\d\d|fetch failed|ETIMEDOUT|ECONNRESET|network/i.test(msg)
+      if (!isRetryable || attempt >= retryDelays.length) {
+        throw e
+      }
+      console.log(
+        `    ⏳ Railway error (${msg.slice(0, 80)}), retrying in ${retryDelays[attempt] / 1000}s (attempt ${attempt + 1}/${retryDelays.length})...`,
+      )
+      await sleep(retryDelays[attempt])
+    }
+  }
+  throw lastError
 }
 
 // ---------------------------------------------------------------------------
@@ -485,13 +516,17 @@ async function processMovie(id, progress) {
     console.log(`  ⏭️  movie ${id}: no servers`)
     return
   }
-  const urls = servers.map((s) => s.url).filter(Boolean)
+  // cinemm.com returns playUrl (shortlink) + downloadUrl. Use playUrl for streams.
+  // Fall back to url field for older response format.
+  const urls = servers
+    .map((s) => s.playUrl || s.url)
+    .filter((u) => u && (u.startsWith('http://') || u.startsWith('https://')))
   if (urls.length === 0) {
     console.log(`  ⏭️  movie ${id}: servers have no URLs`)
     return
   }
   try {
-    const result = await submitToRailway(id, 'movie', null, urls)
+    const result = await submitToRailwayWithRetry(id, 'movie', null, urls)
     progress.submittedCount += result.stored || 0
     progress.failedCount += result.failed || 0
     console.log(`  ✅ movie ${id}: ${result.stored}/${urls.length} stored, ${result.failed} failed`)
@@ -518,34 +553,38 @@ async function processSeries(id, progress) {
   }
   console.log(`  📺 series ${id}: ${seasons.length} seasons`)
   for (const season of seasons) {
+    const seasonNum = season.season_number ?? season.seasonNumber ?? '?'
     const episodes = season.episodes || []
     for (const ep of episodes) {
       if (!ep.id) continue
+      const epNum = ep.episode_number ?? ep.episodeNumber ?? '?'
       try {
-        const sources = await getEpisodeSources(ep.id)
+        // Pass BOTH episodeId and episodeNumber as numbers
+        const sources = await getEpisodeSources(ep.id, ep.episode_number ?? ep.episodeNumber ?? 1)
         if (!sources || sources.access !== 'direct') {
           console.log(
-            `    ⏭️  S${season.season_number}E${ep.episode_number}: access="${sources?.access || 'null'}"`,
+            `    ⏭️  S${seasonNum}E${epNum}: access="${sources?.access || 'null'}"`,
           )
           await sleep(currentDelayMs)
           continue
         }
         const servers = sources.servers || []
-        const urls = servers.map((s) => s.url).filter(Boolean)
+        // Use playUrl if present (cinemm.com returns shortlinks), else fall back to url
+        const urls = servers.map((s) => s.playUrl || s.url).filter(Boolean)
         if (urls.length === 0) {
-          console.log(`    ⏭️  S${season.season_number}E${ep.episode_number}: no URLs`)
+          console.log(`    ⏭️  S${seasonNum}E${epNum}: no URLs`)
           await sleep(currentDelayMs)
           continue
         }
-        const result = await submitToRailway(id, 'series', ep.id, urls)
+        const result = await submitToRailwayWithRetry(id, 'series', ep.id, urls)
         progress.submittedCount += result.stored || 0
         progress.failedCount += result.failed || 0
         console.log(
-          `    ✅ S${season.season_number}E${ep.episode_number}: ${result.stored}/${urls.length} stored`,
+          `    ✅ S${seasonNum}E${epNum}: ${result.stored}/${urls.length} stored`,
         )
       } catch (e) {
         progress.failedCount++
-        console.error(`    ❌ S${season.season_number}E${ep.episode_number}: ${e.message}`)
+        console.error(`    ❌ S${seasonNum}E${epNum}: ${e.message}`)
       }
       await sleep(currentDelayMs)
     }

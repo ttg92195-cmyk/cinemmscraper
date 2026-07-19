@@ -69,6 +69,15 @@ export interface CinemmServer {
   name: string
   size: string  // 'N/A' when source returns null
   url: string
+  // New fields from cinemm.com's 2026-07 server response (getMovieSourcesAction):
+  //   servers: [{ name, quality, size, filename, playUrl, downloadUrl }]
+  // playUrl is a cinemm.com/p/... shortlink that 302-redirects to the real stream URL.
+  // downloadUrl is a cinemm.com/d/... shortlink for the download endpoint.
+  // We map playUrl → url for backwards compatibility (existing code reads s.url).
+  quality?: string
+  filename?: string
+  playUrl?: string
+  downloadUrl?: string
 }
 
 /** A single episode inside a season (returned by getSeriesDetails). */
@@ -668,8 +677,17 @@ export async function getMovieDetails(
         // If proxy is a Myanmar IP, access will be "direct" and servers will have URLs
         if (sourceParsed.servers && sourceParsed.servers.length > 0) {
           result.servers = sourceParsed.servers.map((s) => ({
-            ...s,
+            name: s.name ?? '',
             size: s.size ?? 'N/A',
+            // Prefer playUrl (cinemm.com/p/... shortlink) over url field.
+            // The shortlink 302-redirects to the real stream URL, and is what
+            // the UI's "Watch" button should open. The /api/manual-link
+            // endpoint resolves this shortlink server-side to get the real URL.
+            url: s.playUrl || s.url || '',
+            quality: s.quality,
+            filename: s.filename,
+            playUrl: s.playUrl,
+            downloadUrl: s.downloadUrl,
           }))
           console.log(`[cinemm] getMovieSources returned ${result.servers.length} servers (access: ${sourceParsed.access})`)
         }
