@@ -552,12 +552,19 @@ async function processSeries(id, progress) {
     return
   }
   console.log(`  📺 series ${id}: ${seasons.length} seasons`)
-  for (const season of seasons) {
-    const seasonNum = season.season_number ?? season.seasonNumber ?? '?'
+  for (let seasonIdx = 0; seasonIdx < seasons.length; seasonIdx++) {
+    const season = seasons[seasonIdx]
+    // cinemm.com's response format (verified 2026-07-19):
+    //   season = { id, name, episodes }
+    //   episode = { id, episode_number, name, sourceAvailability }
+    // There's NO season_number field — we use the array index + 1 as the display number.
+    const seasonNum = seasonIdx + 1
     const episodes = season.episodes || []
+    console.log(`  Season ${seasonNum} (${season.name || 'unnamed'}): ${episodes.length} episode(s)`)
     for (const ep of episodes) {
       if (!ep.id) continue
-      const epNum = ep.episode_number ?? ep.episodeNumber ?? '?'
+      // episode_number is the correct field name (confirmed by inspect-series.mjs)
+      const epNum = ep.episode_number ?? ep.episodeNumber ?? ep.episode_num ?? '?'
       try {
         // Pass BOTH episodeId and episodeNumber as numbers
         const sources = await getEpisodeSources(ep.id, ep.episode_number ?? ep.episodeNumber ?? 1)
@@ -570,7 +577,9 @@ async function processSeries(id, progress) {
         }
         const servers = sources.servers || []
         // Use playUrl if present (cinemm.com returns shortlinks), else fall back to url
-        const urls = servers.map((s) => s.playUrl || s.url).filter(Boolean)
+        const urls = servers
+          .map((s) => s.playUrl || s.url)
+          .filter((u) => u && (u.startsWith('http://') || u.startsWith('https://')))
         if (urls.length === 0) {
           console.log(`    ⏭️  S${seasonNum}E${epNum}: no URLs`)
           await sleep(currentDelayMs)
