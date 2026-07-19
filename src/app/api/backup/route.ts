@@ -7,7 +7,8 @@ import path from 'path'
 const execAsync = promisify(exec)
 
 export const runtime = 'nodejs'
-export const maxDuration = 300 // 5 minutes — backup may take a while for large DBs
+export const maxDuration = 60 // 1 minute — Railway trial has memory limits
+// (was 300s but Railway free trial sometimes can't sustain that)
 
 /**
  * POST /api/backup
@@ -108,9 +109,10 @@ export async function POST(req: NextRequest) {
     await execAsync(`chmod +x ${scriptPath}`).catch(() => {})
 
     // Run the backup script
-    // Capture stdout + stderr together, with a 4-minute timeout
+    // Capture stdout + stderr together, with a 50-second timeout
+    // (maxDuration is 60s — leave 10s buffer for response)
     const { stdout, stderr } = await execAsync(`bash ${scriptPath}`, {
-      timeout: 240000,
+      timeout: 50000,
       maxBuffer: 1024 * 1024 * 5, // 5MB buffer for log output
     })
 
