@@ -163,18 +163,77 @@ function parseRsc(text) {
 // cinemm.com Server Action call
 // ---------------------------------------------------------------------------
 
+// Track 500-error rate — if too many in a row, auto-increase delay
+let consecutive500Errors = 0
+let currentDelayMs = DELAY_MS
+
 async function callAction(actionId, args) {
-  const res = await fetch(`${CINEMM_ORIGIN}/`, {
-    method: 'POST',
-    headers: { ...COMMON_HEADERS, 'Next-Action': actionId },
-    body: JSON.stringify(args),
-    signal: AbortSignal.timeout(20000),
-  })
-  if (!res.ok) {
+  // Retry with exponential backoff for 500/502/503/429 errors.
+  // 500 errors are common when cinemm.com is rate-limiting or temporarily
+  // overloaded. We retry up to 3 times with 5s, 15s, 30s delays.
+  const retryStatuses = [429, 500, 502, 503, 504]
+  const retryDelays = [5000, 15000, 30000] // 5s, 15s, 30s
+
+  let lastError = null
+  for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
+    let res
+    try {
+      res = await fetch(`${CINEMM_ORIGIN}/`, {
+        method: 'POST',
+        headers: { ...COMMON_HEADERS, 'Next-Action': actionId },
+        body: JSON.stringify(args),
+        signal: AbortSignal.timeout(25000),
+      })
+    } catch (e) {
+      // Network error — retry
+      lastError = e
+      if (attempt < retryDelays.length) {
+        console.log(
+          `    ⏳ Network error (${e.message}), retrying in ${retryDelays[attempt] / 1000}s...`,
+        )
+        await sleep(retryDelays[attempt])
+        continue
+      }
+      throw e
+    }
+
+    if (res.ok) {
+      // Success — reset 500 counter, maybe decrease delay
+      if (consecutive500Errors > 0) {
+        console.log(`    ✅ Recovered after ${consecutive500Errors} 500-error(s)`)
+      }
+      consecutive500Errors = 0
+      // Slowly restore original delay (don't drop below 1.5x baseline)
+      if (currentDelayMs > DELAY_MS * 1.5) {
+        currentDelayMs = Math.max(DELAY_MS * 1.5, currentDelayMs * 0.7)
+      }
+      const text = await res.text()
+      return { lines: parseRsc(text), raw: text }
+    }
+
+    // Non-OK response
+    if (retryStatuses.includes(res.status) && attempt < retryDelays.length) {
+      // Retryable error — back off and retry
+      consecutive500Errors++
+      // Auto-increase delay if we're getting a lot of 500s
+      if (consecutive500Errors >= 3 && currentDelayMs < DELAY_MS * 5) {
+        currentDelayMs = Math.min(DELAY_MS * 5, currentDelayMs * 1.5)
+        console.log(
+          `    ⚠️  ${consecutive500Errors} 500-errors in a row — auto-increasing delay to ${currentDelayMs}ms`,
+        )
+      }
+      console.log(
+        `    ⏳ HTTP ${res.status}, retrying in ${retryDelays[attempt] / 1000}s (attempt ${attempt + 1}/${retryDelays.length})...`,
+      )
+      await sleep(retryDelays[attempt])
+      continue
+    }
+
+    // Non-retryable error (4xx other than 429) — fail fast
     throw new Error(`cinemm.com HTTP ${res.status} ${res.statusText}`)
   }
-  const text = await res.text()
-  return { lines: parseRsc(text), raw: text }
+  // Exhausted all retries
+  throw lastError || new Error('cinemm.com: max retries exceeded')
 }
 
 // ---------------------------------------------------------------------------
@@ -346,7 +405,7 @@ async function discoverIdsForType(type, progress) {
       console.error(`  "${q}" → ERROR: ${e.message}`)
     }
     saveProgress(progress)
-    await sleep(DELAY_MS)
+    await sleep(currentDelayMs)
   }
 
   progress.discoveredIds[type] = Array.from(known)
@@ -390,7 +449,7 @@ async function discoverIdsForType(type, progress) {
       progress.discoveredIds[type] = Array.from(known)
       saveProgress(progress)
     }
-    await sleep(DELAY_MS)
+    await sleep(currentDelayMs)
   }
 
   progress.discoveredIds[type] = Array.from(known)
@@ -459,14 +518,14 @@ async function processSeries(id, progress) {
           console.log(
             `    ⏭️  S${season.season_number}E${ep.episode_number}: access="${sources?.access || 'null'}"`,
           )
-          await sleep(DELAY_MS)
+          await sleep(currentDelayMs)
           continue
         }
         const servers = sources.servers || []
         const urls = servers.map((s) => s.url).filter(Boolean)
         if (urls.length === 0) {
           console.log(`    ⏭️  S${season.season_number}E${ep.episode_number}: no URLs`)
-          await sleep(DELAY_MS)
+          await sleep(currentDelayMs)
           continue
         }
         const result = await submitToRailway(id, 'series', ep.id, urls)
@@ -479,7 +538,7 @@ async function processSeries(id, progress) {
         progress.failedCount++
         console.error(`    ❌ S${season.season_number}E${ep.episode_number}: ${e.message}`)
       }
-      await sleep(DELAY_MS)
+      await sleep(currentDelayMs)
     }
   }
 }
@@ -529,19 +588,37 @@ async function main() {
     for (let i = 0; i < queue.length; i++) {
       const id = queue[i]
       const label = `[${i + 1}/${queue.length}]`
+      let success = false
+      let errorMsg = ''
       try {
         if (type === 'movie') {
           console.log(`${label} movie ${id}`)
           await processMovie(id, progress)
+          success = true
         } else {
           console.log(`${label} series ${id}`)
           await processSeries(id, progress)
+          success = true
         }
       } catch (e) {
         progress.failedCount++
-        console.error(`${label} ERROR: ${e.message}`)
+        errorMsg = e instanceof Error ? e.message : String(e)
+        console.error(`${label} ERROR: ${errorMsg}`)
       }
-      progress.processedIds[type].push(id)
+      // Decide whether to mark this ID as "processed" (skip on next run):
+      //   - Success → mark as processed
+      //   - Failed with HTTP 5xx / 429 / network error → DON'T mark (retry next run)
+      //   - Failed with "access:telegram" or "no servers" → mark as processed
+      //     (movie exists but has no URLs — no point retrying)
+      if (success) {
+        progress.processedIds[type].push(id)
+      } else if (/HTTP 5\d\d|HTTP 429|network|ETIMEDOUT|ECONN|fetch failed/i.test(errorMsg)) {
+        // Transient error — will retry on next run
+        console.log(`    🔁 Will retry on next run (transient error)`)
+      } else {
+        // Permanent failure (e.g. access:telegram, no servers) — skip on next run
+        progress.processedIds[type].push(id)
+      }
       if ((i + 1) % 10 === 0) {
         saveProgress(progress)
         console.log(
@@ -550,7 +627,7 @@ async function main() {
             `Failed: ${progress.failedCount}\n`,
         )
       }
-      await sleep(DELAY_MS)
+      await sleep(currentDelayMs)
     }
     saveProgress(progress)
   }
