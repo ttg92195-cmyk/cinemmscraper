@@ -40,9 +40,9 @@ const RAILWAY_URL = (
 const CINEMM_ORIGIN = 'https://cinemm.com'
 
 const ACTIONS = {
-  getMovieSources: '40f8eb1c1169207ffd4d06dd202d7580609061d2bb',
+  getMovieSources: '60f8eb1c1169207ffd4d06dd202d7580609061d2bb',
   getSeriesDetails: '40b9e9dc40d8b3b16f4984f373bb59cf57515e283f',
-  getEpisodeSources: '605765e4f6aa5ce95c001ef982ddc2a6ac62c60930',
+  getEpisodeSources: '705765e4f6aa5ce95c001ef982ddc2a6ac62c60930',
 }
 
 const COMMON_HEADERS = {

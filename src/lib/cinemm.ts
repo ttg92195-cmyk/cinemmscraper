@@ -20,20 +20,23 @@ import { getCache, setCache } from '@/lib/cache'
 
 const CINEMM_ORIGIN = 'https://cinemm.com'
 
-// Server Action IDs (extracted from cinemm.com's bundled JS — updated 2026-07-15
-// after cinemm.com regenerated all action IDs + changed movie IDs to bigints).
-// Mapping verified from page-f46752db4105891f.js:
-//   createServerReference("40f8eb1c1169207ffd4d06dd202d7580609061d2bb", ..., "getMovieSourcesAction")
-//   createServerReference("605765e4f6aa5ce95c001ef982ddc2a6ac62c60930", ..., "getEpisodeSourcesAction")
+// Server Action IDs (extracted from cinemm.com's bundled JS — updated 2026-07-20
+// after cinemm.com changed the FIRST hex byte of two actions:
+//   - getMovieSourcesAction:    40f8... → 60f8...
+//   - getEpisodeSourcesAction:  6057... → 7057...
+// The other three actions remained unchanged.
+// Mapping verified from page-09c4e8584cd85c74.js:
+//   createServerReference("60f8eb1c1169207ffd4d06dd202d7580609061d2bb", ..., "getMovieSourcesAction")
+//   createServerReference("705765e4f6aa5ce95c001ef982ddc2a6ac62c60930", ..., "getEpisodeSourcesAction")
 //   createServerReference("60ffdc3034e91f62a96097852d58446360f909809e", ..., "searchAction")
 //   createServerReference("60c193f3ef02d7353ffc530e701e0a0dd388f716f0", ..., "getMovieDetailsAction")
 //   createServerReference("40b9e9dc40d8b3b16f4984f373bb59cf57515e283f", ..., "getSeriesDetailsAction")
 const ACTIONS = {
   search:              '60ffdc3034e91f62a96097852d58446360f909809e', // searchAction
   getMovieServers:     '60c193f3ef02d7353ffc530e701e0a0dd388f716f0', // getMovieDetailsAction (overview)
-  getMovieSources:     '40f8eb1c1169207ffd4d06dd202d7580609061d2bb', // getMovieSourcesAction
+  getMovieSources:     '60f8eb1c1169207ffd4d06dd202d7580609061d2bb', // getMovieSourcesAction
   getSeriesDetails:    '40b9e9dc40d8b3b16f4984f373bb59cf57515e283f', // getSeriesDetailsAction
-  getEpisodeServers:   '605765e4f6aa5ce95c001ef982ddc2a6ac62c60930', // getEpisodeSourcesAction
+  getEpisodeServers:   '705765e4f6aa5ce95c001ef982ddc2a6ac62c60930', // getEpisodeSourcesAction
 } as const
 
 const COMMON_HEADERS = {
