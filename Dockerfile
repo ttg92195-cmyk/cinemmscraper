@@ -1,6 +1,6 @@
 FROM node:20-slim
 
-# Install Playwright system dependencies
+# Install Playwright system dependencies + git + sqlite3 + findutils (for backup script)
 RUN apt-get update && apt-get install -y \
     libnss3 \
     libnspr4 \
@@ -21,6 +21,9 @@ RUN apt-get update && apt-get install -y \
     libatspi2.0-0 \
     libwayland-client0 \
     wget \
+    git \
+    sqlite3 \
+    findutils \
     && rm -rf /var/lib/apt/lists/*
 
 # Install bun
