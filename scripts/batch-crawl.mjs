@@ -1,0 +1,482 @@
+/**
+ * Batch Crawler — process 20 items at a time (Bro's smart plan).
+ *
+ * Why this exists:
+ *   - Full 6500+ item crawl takes 30+ hours and can fail if VPN IP gets
+ *     blocked mid-run
+ *   - Bro wants to do small batches (20 items), verify the URLs work,
+ *     then do another batch when he has time
+ *   - If VPN IP gets blocked, just switch VPN server and continue
+ *
+ * Usage:
+ *   node scripts/batch-crawl.mjs movie     # process next 20 un-processed movies
+ *   node scripts/batch-crawl.mjs series    # process next 20 un-processed series
+ *   node scripts/batch-crawl.mjs movie 50  # process next 50 movies (custom batch size)
+ *
+ * Behavior:
+ *   1. Loads crawl-progress.json
+ *   2. Filters to un-processed IDs of the chosen type
+ *   3. Takes next 20 (or custom count)
+ *   4. For each: calls getMovieSourcesAction / getEpisodeSourcesAction
+ *   5. Submits shortlinks to Railway (with retry on 502)
+ *   6. Saves progress after each item (so you can Ctrl+C anytime)
+ *   7. Prints summary at the end
+ *
+ * Re-running with same type continues from where you left off — already
+ * processed IDs are auto-skipped. So running it 10 times = 200 items total.
+ *
+ * If VPN IP gets blocked mid-batch:
+ *   - Ctrl+C to stop
+ *   - Switch VPN server (or wait 30 min for IP cooldown)
+ *   - Re-run same command — picks up where it stopped
+ */
+
+import fs from 'fs'
+
+const RAILWAY_URL = (
+  process.env.RAILWAY_URL || 'https://cinemmscraper-production.up.railway.app'
+).replace(/\/+$/, '')
+
+const CINEMM_ORIGIN = 'https://cinemm.com'
+
+const ACTIONS = {
+  getMovieSources: '40f8eb1c1169207ffd4d06dd202d7580609061d2bb',
+  getSeriesDetails: '40b9e9dc40d8b3b16f4984f373bb59cf57515e283f',
+  getEpisodeSources: '605765e4f6aa5ce95c001ef982ddc2a6ac62c60930',
+}
+
+const COMMON_HEADERS = {
+  'User-Agent':
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  Accept: 'text/x-component',
+  'Content-Type': 'text/plain;charset=UTF-8',
+  'Next-Router-State-Tree':
+    '%5B%22%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%5D%7D%2Cnull%2Cnull%2Ctrue%5D',
+  Referer: `${CINEMM_ORIGIN}/`,
+  Origin: CINEMM_ORIGIN,
+}
+
+const DELAY_MS = parseInt(process.env.CRAWL_DELAY_MS || '2000', 10)
+const PROGRESS_FILE = process.env.CRAWL_PROGRESS || './crawl-progress.json'
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+// ---------- RSC parser ----------
+const LINE_START_RE = /^([0-9a-f]+):(T[0-9a-f]+,)?/
+
+function parseRsc(text) {
+  const result = new Map()
+  const lines = text.split('\n')
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]
+    const m = line.match(LINE_START_RE)
+    if (!m) { i++; continue }
+    const id = m[1]
+    const isText = !!m[2]
+    const payloadStart = m[0].length
+    let payload = line.substring(payloadStart)
+    if (isText) {
+      i++
+      while (i < lines.length) {
+        const next = lines[i]
+        if (LINE_START_RE.test(next) && next.length > 0) break
+        payload += '\n' + next
+        i++
+      }
+      const markerStr = '1:{'
+      let searchFrom = payload.length
+      while (true) {
+        const markerPos = payload.lastIndexOf(markerStr, searchFrom)
+        if (markerPos <= 0) break
+        const afterMarker = payload.substring(markerPos + markerStr.length)
+        const trimmedAfter = afterMarker.trimEnd()
+        if (trimmedAfter.endsWith('}')) {
+          const candidateJson = '{' + trimmedAfter
+          try {
+            JSON.parse(candidateJson)
+            payload = payload.substring(0, markerPos).trimEnd()
+            result.set('1', candidateJson)
+            break
+          } catch {}
+        }
+        searchFrom = markerPos - 1
+      }
+    } else {
+      i++
+    }
+    if (!result.has(id)) result.set(id, payload)
+  }
+  return result
+}
+
+// ---------- callAction with retry on 500/429 ----------
+let consecutive500Errors = 0
+
+async function callAction(actionId, args) {
+  const retryStatuses = [429, 500, 502, 503, 504]
+  const retryDelays = [5000, 15000, 30000]
+  let lastError = null
+
+  for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
+    let res
+    try {
+      res = await fetch(`${CINEMM_ORIGIN}/`, {
+        method: 'POST',
+        headers: { ...COMMON_HEADERS, 'Next-Action': actionId },
+        body: JSON.stringify(args),
+        signal: AbortSignal.timeout(25000),
+      })
+    } catch (e) {
+      lastError = e
+      if (attempt < retryDelays.length) {
+        console.log(`    ⏳ Network error (${e.message}), retry in ${retryDelays[attempt] / 1000}s...`)
+        await sleep(retryDelays[attempt])
+        continue
+      }
+      throw e
+    }
+
+    if (res.ok) {
+      if (consecutive500Errors > 0) {
+        console.log(`    ✅ Recovered after ${consecutive500Errors} 500-error(s)`)
+      }
+      consecutive500Errors = 0
+      const text = await res.text()
+      return { lines: parseRsc(text), raw: text }
+    }
+
+    if (retryStatuses.includes(res.status) && attempt < retryDelays.length) {
+      consecutive500Errors++
+      console.log(`    ⏳ HTTP ${res.status}, retry in ${retryDelays[attempt] / 1000}s (attempt ${attempt + 1}/3)...`)
+      await sleep(retryDelays[attempt])
+      continue
+    }
+
+    throw new Error(`cinemm.com HTTP ${res.status} ${res.statusText}`)
+  }
+  throw lastError || new Error('cinemm.com: max retries exceeded')
+}
+
+// ---------- Action callers ----------
+async function getMovieSources(id) {
+  const numericId = typeof id === 'string' ? parseInt(id, 10) : id
+  const { lines } = await callAction(ACTIONS.getMovieSources, [numericId])
+  const raw = lines.get('1')
+  if (!raw) return null
+  try { return JSON.parse(raw) } catch { return null }
+}
+
+async function getSeriesDetails(id) {
+  const numericId = typeof id === 'string' ? parseInt(id, 10) : id
+  const { lines } = await callAction(ACTIONS.getSeriesDetails, [numericId, true])
+  const raw = lines.get('1')
+  if (!raw) return null
+  try { return JSON.parse(raw) } catch { return null }
+}
+
+async function getEpisodeSources(episodeId, episodeNumber) {
+  const numericEpId = typeof episodeId === 'string' ? parseInt(episodeId, 10) : episodeId
+  const numericEpNum = typeof episodeNumber === 'string' ? parseInt(episodeNumber, 10) : (episodeNumber || 1)
+  const { lines } = await callAction(ACTIONS.getEpisodeSources, [numericEpId, numericEpNum])
+  const raw = lines.get('1')
+  if (!raw) return null
+  try { return JSON.parse(raw) } catch { return null }
+}
+
+// ---------- Railway submit with retry on 502 ----------
+async function submitToRailway(mediaId, mediaType, episodeId, streamUrls) {
+  const body = {
+    mediaId: String(mediaId),
+    mediaType,
+    shortlinks: streamUrls,
+  }
+  if (episodeId) body.episodeId = String(episodeId)
+
+  const res = await fetch(`${RAILWAY_URL}/api/manual-link`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(90000),
+  })
+  if (!res.ok) {
+    throw new Error(`Railway HTTP ${res.status}: ${await res.text()}`)
+  }
+  return res.json()
+}
+
+async function submitToRailwayWithRetry(mediaId, mediaType, episodeId, streamUrls) {
+  const retryDelays = [10000, 20000, 30000]
+  let lastError = null
+  for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
+    try {
+      return await submitToRailway(mediaId, mediaType, episodeId, streamUrls)
+    } catch (e) {
+      lastError = e
+      const msg = e.message || ''
+      const isRetryable = /HTTP 5\d\d|fetch failed|ETIMEDOUT|ECONNRESET|network/i.test(msg)
+      if (!isRetryable || attempt >= retryDelays.length) throw e
+      console.log(`    ⏳ Railway error, retry in ${retryDelays[attempt] / 1000}s (attempt ${attempt + 1}/3)...`)
+      await sleep(retryDelays[attempt])
+    }
+  }
+  throw lastError
+}
+
+// ---------- Progress file I/O ----------
+function loadProgress() {
+  try {
+    const data = JSON.parse(fs.readFileSync(PROGRESS_FILE, 'utf8'))
+    if (!data.discoveredIds) data.discoveredIds = { movie: [], series: [] }
+    if (!data.processedIds) data.processedIds = { movie: [], series: [] }
+    if (!data.submittedCount) data.submittedCount = 0
+    if (!data.failedCount) data.failedCount = 0
+    return data
+  } catch {
+    return {
+      discoveredIds: { movie: [], series: [] },
+      processedIds: { movie: [], series: [] },
+      submittedCount: 0,
+      failedCount: 0,
+      lastRun: null,
+    }
+  }
+}
+
+function saveProgress(p) {
+  p.lastRun = new Date().toISOString()
+  fs.writeFileSync(PROGRESS_FILE, JSON.stringify(p, null, 2))
+}
+
+// ---------- Processors ----------
+async function processMovie(id, progress) {
+  const sources = await getMovieSources(id)
+  if (!sources) {
+    console.log(`  ⚠️  No response`)
+    return { stored: 0, status: 'no-response' }
+  }
+  if (sources.access !== 'direct') {
+    console.log(`  ⚠️  access="${sources.access}" (VPN IP not Myanmar?)`)
+    return { stored: 0, status: 'not-direct' }
+  }
+  const servers = sources.servers || []
+  if (servers.length === 0) {
+    console.log(`  ⏭️  No servers`)
+    return { stored: 0, status: 'no-servers' }
+  }
+  const urls = servers
+    .map((s) => s.playUrl || s.url)
+    .filter((u) => u && (u.startsWith('http://') || u.startsWith('https://')))
+  if (urls.length === 0) {
+    console.log(`  ⏭️  No URLs in servers`)
+    return { stored: 0, status: 'no-urls' }
+  }
+  try {
+    const result = await submitToRailwayWithRetry(id, 'movie', null, urls)
+    progress.submittedCount += result.stored || 0
+    progress.failedCount += result.failed || 0
+    console.log(`  ✅ ${result.stored}/${urls.length} stored`)
+    if (result.results) {
+      result.results.forEach((r, idx) => {
+        if (r.stored) {
+          console.log(`     [${idx + 1}] ${r.quality || '?'} | ${r.host || '?'} | ${(r.fileName || '').slice(0, 60)}`)
+        } else if (r.error) {
+          console.log(`     [${idx + 1}] ❌ ${r.error}`)
+        }
+      })
+    }
+    return { stored: result.stored || 0, status: 'success' }
+  } catch (e) {
+    progress.failedCount++
+    console.error(`  ❌ Submit failed: ${e.message}`)
+    return { stored: 0, status: 'submit-failed' }
+  }
+}
+
+async function processSeries(id, progress) {
+  const details = await getSeriesDetails(id)
+  if (!details) {
+    console.log(`  ⚠️  No response`)
+    return { stored: 0, status: 'no-response' }
+  }
+  const seasons = details.seasons || []
+  if (seasons.length === 0) {
+    console.log(`  ⏭️  No seasons`)
+    return { stored: 0, status: 'no-seasons' }
+  }
+
+  console.log(`  📺 ${seasons.length} season(s)`)
+  let totalStored = 0
+  let totalEpisodes = 0
+
+  for (let seasonIdx = 0; seasonIdx < seasons.length; seasonIdx++) {
+    const season = seasons[seasonIdx]
+    const seasonNum = seasonIdx + 1
+    const episodes = season.episodes || []
+    console.log(`  Season ${seasonNum} (${season.name || 'unnamed'}): ${episodes.length} episode(s)`)
+
+    for (const ep of episodes) {
+      if (!ep.id) continue
+      const epNum = ep.episode_number ?? ep.episodeNumber ?? 1
+      totalEpisodes++
+      try {
+        const sources = await getEpisodeSources(ep.id, epNum)
+        if (!sources || sources.access !== 'direct') {
+          console.log(`    ⏭️  S${seasonNum}E${epNum}: access="${sources?.access || 'null'}"`)
+          await sleep(DELAY_MS)
+          continue
+        }
+        const servers = sources.servers || []
+        const urls = servers
+          .map((s) => s.playUrl || s.url)
+          .filter((u) => u && (u.startsWith('http://') || u.startsWith('https://')))
+        if (urls.length === 0) {
+          console.log(`    ⏭️  S${seasonNum}E${epNum}: no URLs`)
+          await sleep(DELAY_MS)
+          continue
+        }
+        const result = await submitToRailwayWithRetry(id, 'series', ep.id, urls)
+        progress.submittedCount += result.stored || 0
+        progress.failedCount += result.failed || 0
+        totalStored += result.stored || 0
+        console.log(`    ✅ S${seasonNum}E${epNum}: ${result.stored}/${urls.length} stored`)
+      } catch (e) {
+        progress.failedCount++
+        console.error(`    ❌ S${seasonNum}E${epNum}: ${e.message}`)
+      }
+      await sleep(DELAY_MS)
+    }
+  }
+  return { stored: totalStored, status: 'success', episodes: totalEpisodes }
+}
+
+// ---------- Main ----------
+async function main() {
+  const type = process.argv[2] // 'movie' or 'series'
+  const batchSize = parseInt(process.argv[3] || '20', 10)
+
+  if (type !== 'movie' && type !== 'series') {
+    console.log('═══════════════════════════════════════════════════════')
+    console.log('  Batch Crawler — process N items at a time')
+    console.log('═══════════════════════════════════════════════════════\n')
+    console.log('Usage:')
+    console.log('  node scripts/batch-crawl.mjs movie       # next 20 movies')
+    console.log('  node scripts/batch-crawl.mjs series      # next 20 series')
+    console.log('  node scripts/batch-crawl.mjs movie 50    # next 50 movies')
+    console.log('')
+    console.log('Re-running with same type continues from where you left off.')
+    console.log('Already-processed IDs are auto-skipped.\n')
+    console.log('Optional env vars:')
+    console.log('  CRAWL_DELAY_MS=2000     (default: 2000ms between requests)')
+    console.log('  RAILWAY_URL=...         (default: production URL)')
+    process.exit(0)
+  }
+
+  console.log('═══════════════════════════════════════════════════════')
+  console.log(`  Batch Crawler — ${type.toUpperCase()} (batch size: ${batchSize})`)
+  console.log('═══════════════════════════════════════════════════════\n')
+  console.log(`Railway URL: ${RAILWAY_URL}`)
+  console.log(`Delay:       ${DELAY_MS}ms\n`)
+
+  const progress = loadProgress()
+  const discovered = progress.discoveredIds[type] || []
+  const processed = new Set(progress.processedIds[type] || [])
+
+  console.log(`📂 Progress:`)
+  console.log(`   Discovered ${type}s: ${discovered.length}`)
+  console.log(`   Already processed:  ${processed.size}`)
+  console.log(`   Remaining:          ${discovered.length - processed.size}`)
+
+  if (discovered.length === 0) {
+    console.log(`\n❌ No ${type} IDs discovered yet. Run discovery first:`)
+    console.log(`   CRAWL_TYPES=${type} CRAWL_QUERY_MODE=auto node scripts/crawl-from-phone.mjs`)
+    process.exit(1)
+  }
+
+  // Get next batch of un-processed IDs
+  const queue = discovered.filter((id) => !processed.has(id)).slice(0, batchSize)
+
+  if (queue.length === 0) {
+    console.log(`\n🎉 All ${discovered.length} ${type}s already processed!`)
+    console.log(`   Total submitted: ${progress.submittedCount}`)
+    console.log(`   Total failed:    ${progress.failedCount}`)
+    process.exit(0)
+  }
+
+  console.log(`\n🚀 Processing ${queue.length} ${type}(s) this batch...\n`)
+
+  const stats = {
+    success: 0,
+    noUrls: 0,
+    failed: 0,
+    stored: 0,
+    episodesProcessed: 0, // series only
+  }
+
+  for (let i = 0; i < queue.length; i++) {
+    const id = queue[i]
+    console.log(`━━━ [${i + 1}/${queue.length}] ${type} ${id} ━━━`)
+
+    let result
+    try {
+      if (type === 'movie') {
+        result = await processMovie(id, progress)
+      } else {
+        result = await processSeries(id, progress)
+        if (result.episodes) stats.episodesProcessed += result.episodes
+      }
+    } catch (e) {
+      progress.failedCount++
+      console.error(`  ❌ ERROR: ${e.message}`)
+      result = { stored: 0, status: 'error' }
+    }
+
+    stats.stored += result.stored || 0
+    if (result.status === 'success') stats.success++
+    else if (result.status === 'no-servers' || result.status === 'no-urls' || result.status === 'no-seasons' || result.status === 'not-direct') stats.noUrls++
+    else stats.failed++
+
+    // Mark as processed (skip on next run) — only for permanent results
+    // For transient errors (HTTP 5xx, network), don't mark so we retry next time
+    if (result.status === 'success' || result.status === 'no-servers' || result.status === 'no-urls' || result.status === 'no-seasons' || result.status === 'no-response' || result.status === 'not-direct') {
+      progress.processedIds[type].push(id)
+    } else {
+      console.log(`  🔁 Will retry on next batch (transient error)`)
+    }
+
+    saveProgress(progress)
+    await sleep(DELAY_MS)
+  }
+
+  // Summary
+  console.log('\n═══════════════════════════════════════════════════════')
+  console.log('  📊 BATCH SUMMARY')
+  console.log('═══════════════════════════════════════════════════════\n')
+  console.log(`  ${type.toUpperCase()}s processed this batch: ${queue.length}`)
+  console.log(`  ✅ Success:    ${stats.success}`)
+  console.log(`  ⏭️  No URLs:    ${stats.noUrls}`)
+  console.log(`  ❌ Failed:     ${stats.failed}`)
+  console.log(`  📦 URLs stored: ${stats.stored}`)
+  if (type === 'series') {
+    console.log(`  📺 Episodes processed: ${stats.episodesProcessed}`)
+  }
+  console.log(`\n  Total ${type} progress: ${progress.processedIds[type].length}/${discovered.length}`)
+  console.log(`  Total URLs stored all-time: ${progress.submittedCount}`)
+
+  const remaining = discovered.length - progress.processedIds[type].length
+  if (remaining > 0) {
+    console.log(`\n➡️  ${remaining} ${type}(s) remaining for next batch.`)
+    console.log(`   Run: node scripts/batch-crawl.mjs ${type}`)
+  } else {
+    console.log(`\n🎉 All ${discovered.length} ${type}s done!`)
+  }
+
+  console.log('\n🔍 Verify on the website:')
+  console.log(`   ${RAILWAY_URL}`)
+  console.log('\n═══════════════════════════════════════════════════════')
+}
+
+main().catch((e) => {
+  console.error('FATAL:', e)
+  process.exit(1)
+})
