@@ -189,9 +189,9 @@ console.log('══════════════════════�
 const known = {
   search: '60ffdc3034e91f62a96097852d58446360f909809e',
   getMovieServers: '60c193f3ef02d7353ffc530e701e0a0dd388f716f0',
-  getMovieSources: '40f8eb1c1169207ffd4d06dd202d7580609061d2bb',
+  getMovieSources: '60f8eb1c1169207ffd4d06dd202d7580609061d2bb',
   getSeriesDetails: '40b9e9dc40d8b3b16f4984f373bb59cf57515e283f',
-  getEpisodeServers: '605765e4f6aa5ce95c001ef982ddc2a6ac62c60930',
+  getEpisodeServers: '705765e4f6aa5ce95c001ef982ddc2a6ac62c60930',
 }
 
 for (const [name, id] of Object.entries(known)) {

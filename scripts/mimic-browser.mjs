@@ -63,7 +63,7 @@ const profiles = [
         '%5B%22%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%5D%7D%2Cnull%2Cnull%2Ctrue%5D',
       Origin: CINEMM_ORIGIN,
       Referer: CINEMM_ORIGIN + '/',
-      'Next-Action': '40f8eb1c1169207ffd4d06dd202d7580609061d2bb',
+      'Next-Action': '60f8eb1c1169207ffd4d06dd202d7580609061d2bb',
     },
     body: JSON.stringify([MOVIE_ID]),
   },
@@ -75,7 +75,7 @@ const profiles = [
       Accept: 'text/x-component',
       'Accept-Language': 'en-US,en;q=0.9',
       'Content-Type': 'text/plain;charset=UTF-8',
-      'Next-Action': '40f8eb1c1169207ffd4d06dd202d7580609061d2bb',
+      'Next-Action': '60f8eb1c1169207ffd4d06dd202d7580609061d2bb',
       'Next-Router-State-Tree':
         '%5B%22%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%5D%7D%2Cnull%2Cnull%2Ctrue%5D',
       Origin: CINEMM_ORIGIN,
@@ -94,7 +94,7 @@ const profiles = [
       Accept: 'text/x-component',
       'Accept-Language': 'en-US,en;q=0.9',
       'Content-Type': 'text/plain;charset=UTF-8',
-      'Next-Action': '40f8eb1c1169207ffd4d06dd202d7580609061d2bb',
+      'Next-Action': '60f8eb1c1169207ffd4d06dd202d7580609061d2bb',
       'Next-Router-State-Tree':
         '%5B%22%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%5D%7D%2Cnull%2Cnull%2Ctrue%5D',
       Origin: CINEMM_ORIGIN,
@@ -119,7 +119,7 @@ if (COOKIES_FROM_ENV) {
       Accept: 'text/x-component',
       'Accept-Language': 'en-US,en;q=0.9',
       'Content-Type': 'text/plain;charset=UTF-8',
-      'Next-Action': '40f8eb1c1169207ffd4d06dd202d7580609061d2bb',
+      'Next-Action': '60f8eb1c1169207ffd4d06dd202d7580609061d2bb',
       'Next-Router-State-Tree':
         '%5B%22%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%5D%7D%2Cnull%2Cnull%2Ctrue%5D',
       Origin: CINEMM_ORIGIN,

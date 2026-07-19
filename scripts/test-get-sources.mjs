@@ -16,7 +16,7 @@ import fs from 'fs'
 
 const ACTIONS = {
   search: '60ffdc3034e91f62a96097852d58446360f909809e',
-  getMovieSources: '40f8eb1c1169207ffd4d06dd202d7580609061d2bb',
+  getMovieSources: '60f8eb1c1169207ffd4d06dd202d7580609061d2bb',
 }
 
 const headers = {

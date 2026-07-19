@@ -142,7 +142,7 @@ async function testProxy() {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             Accept: 'text/x-component',
             'Content-Type': 'text/plain;charset=UTF-8',
-            'Next-Action': '40f8eb1c1169207ffd4d06dd202d7580609061d2bb',
+            'Next-Action': '60f8eb1c1169207ffd4d06dd202d7580609061d2bb',
             Origin: 'https://cinemm.com',
           },
           body: JSON.stringify([movieId]),

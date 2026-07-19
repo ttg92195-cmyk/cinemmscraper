@@ -23,7 +23,7 @@ const COMMON_HEADERS = {
 
 const ACTIONS = {
   search: '60ffdc3034e91f62a96097852d58446360f909809e',
-  getMovieSources: '40f8eb1c1169207ffd4d06dd202d7580609061d2bb',
+  getMovieSources: '60f8eb1c1169207ffd4d06dd202d7580609061d2bb',
   getMovieDetails: '60c193f3ef02d7353ffc530e701e0a0dd388f716f0',
 }
 
