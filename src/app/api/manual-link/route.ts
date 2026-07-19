@@ -188,128 +188,141 @@ export async function POST(req: NextRequest) {
       failed++
       continue
     }
-    if (parsed.hostname !== 'cinemm.com' || !parsed.pathname.startsWith('/p/')) {
-      results.push({
-        shortlink,
-        stored: false,
-        error: 'URL must be a cinemm.com shortlink (https://cinemm.com/p/...)',
-      })
-      failed++
-      continue
+
+    // Detect URL type:
+    //   - cinemm.com/p/...  → shortlink, needs 302 redirect resolution
+    //   - any other URL     → direct stream URL (e.g. from getMovieSourcesAction
+    //                         when called from Myanmar IP), skip resolution
+    const isCinemmShortlink =
+      parsed.hostname === 'cinemm.com' && parsed.pathname.startsWith('/p/')
+
+    let streamUrl: string
+    let storedShortlink: string // what we store in the `shortlink` column
+
+    if (isCinemmShortlink) {
+      // ---- Shortlink path: resolve via 302 redirect ----
+      storedShortlink = shortlink
+      try {
+        const res = await fetch(shortlink, {
+          method: 'GET',
+          redirect: 'manual',
+          headers: {
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            Accept: 'text/html,application/xhtml+xml',
+            'Accept-Language': 'en-US,en;q=0.9',
+          },
+          signal: AbortSignal.timeout(15000),
+        })
+
+        if (res.status < 300 || res.status >= 400) {
+          results.push({
+            shortlink,
+            stored: false,
+            error: `Shortlink did not redirect (HTTP ${res.status})`,
+          })
+          failed++
+          continue
+        }
+
+        const location = res.headers.get('location')
+        if (!location) {
+          results.push({
+            shortlink,
+            stored: false,
+            error: 'Redirect status but no Location header',
+          })
+          failed++
+          continue
+        }
+        streamUrl = location
+      } catch (e) {
+        results.push({
+          shortlink,
+          stored: false,
+          error: e instanceof Error ? e.message : 'Failed to resolve shortlink',
+        })
+        failed++
+        continue
+      }
+    } else {
+      // ---- Direct stream URL path: skip resolution ----
+      // Used by the Termux crawler script (scripts/crawl-from-phone.mjs)
+      // which calls getMovieSourcesAction from a Myanmar IP and gets
+      // stream URLs directly.
+      streamUrl = shortlink
+      storedShortlink = shortlink // store the stream URL itself as the "shortlink"
     }
 
-    // Resolve the shortlink (fetch with redirect: 'manual')
+    // Parse metadata from streamUrl
+    const quality = parseQuality(streamUrl)
+    const format = parseFormat(streamUrl)
+    const host = parseHost(streamUrl)
+    const fileName = parseFileName(streamUrl)
+
+    // Fetch file size via HEAD request (may fail for some hosts → "N/A")
+    const fileSize = await fetchFileSize(streamUrl)
+
+    // No expiry — store permanently (Bro wants URLs to persist forever).
+    // Previously this was 7-day TTL, but Bro requested permanent storage.
+    // We use year 9999 as "never expires" (SQLite handles this fine).
+    const expiresAt = new Date('9999-12-31T23:59:59.000Z')
+
+    // Upsert into DB — if the same shortlink already exists for this media+episode,
+    // update it (refresh TTL + metadata); otherwise insert new.
     try {
-      const res = await fetch(shortlink, {
-        method: 'GET',
-        redirect: 'manual',
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          Accept: 'text/html,application/xhtml+xml',
-          'Accept-Language': 'en-US,en;q=0.9',
-        },
-        signal: AbortSignal.timeout(15000),
+      // Find existing by (mediaId, episodeId, shortlink) — note: SQLite doesn't support
+      // composite unique constraints easily, so we query first.
+      const existing = await db.manualStreamUrl.findFirst({
+        where: { mediaId, episodeId: epId, shortlink: storedShortlink },
       })
-
-      if (res.status < 300 || res.status >= 400) {
-        results.push({
-          shortlink,
-          stored: false,
-          error: `Shortlink did not redirect (HTTP ${res.status})`,
+      if (existing) {
+        await db.manualStreamUrl.update({
+          where: { id: existing.id },
+          data: {
+            streamUrl,
+            quality,
+            format,
+            host,
+            fileName,
+            fileSize,
+            expiresAt,
+          },
         })
-        failed++
-        continue
+      } else {
+        await db.manualStreamUrl.create({
+          data: {
+            mediaId,
+            mediaType,
+            episodeId: epId,
+            shortlink: storedShortlink,
+            streamUrl,
+            quality,
+            format,
+            host,
+            fileName,
+            fileSize,
+            expiresAt,
+          },
+        })
       }
-
-      const streamUrl = res.headers.get('location')
-      if (!streamUrl) {
-        results.push({
-          shortlink,
-          stored: false,
-          error: 'Redirect status but no Location header',
-        })
-        failed++
-        continue
-      }
-
-      // Parse metadata from streamUrl
-      const quality = parseQuality(streamUrl)
-      const format = parseFormat(streamUrl)
-      const host = parseHost(streamUrl)
-      const fileName = parseFileName(streamUrl)
-
-      // Fetch file size via HEAD request (may fail for some hosts → "N/A")
-      const fileSize = await fetchFileSize(streamUrl)
-
-      // No expiry — store permanently (Bro wants URLs to persist forever).
-      // Previously this was 7-day TTL, but Bro requested permanent storage.
-      // We use year 9999 as "never expires" (SQLite handles this fine).
-      const expiresAt = new Date('9999-12-31T23:59:59.000Z')
-
-      // Upsert into DB — if the same shortlink already exists for this media+episode,
-      // update it (refresh TTL + metadata); otherwise insert new.
-      try {
-        // Find existing by (mediaId, episodeId, shortlink) — note: SQLite doesn't support
-        // composite unique constraints easily, so we query first.
-        const existing = await db.manualStreamUrl.findFirst({
-          where: { mediaId, episodeId: epId, shortlink },
-        })
-        if (existing) {
-          await db.manualStreamUrl.update({
-            where: { id: existing.id },
-            data: {
-              streamUrl,
-              quality,
-              format,
-              host,
-              fileName,
-              fileSize,
-              expiresAt,
-            },
-          })
-        } else {
-          await db.manualStreamUrl.create({
-            data: {
-              mediaId,
-              mediaType,
-              episodeId: epId,
-              shortlink,
-              streamUrl,
-              quality,
-              format,
-              host,
-              fileName,
-              fileSize,
-              expiresAt,
-            },
-          })
-        }
-        stored++
-        results.push({
-          shortlink,
-          streamUrl,
-          quality,
-          format,
-          host,
-          fileName,
-          fileSize,
-          stored: true,
-        })
-      } catch (dbErr) {
-        results.push({
-          shortlink,
-          streamUrl,
-          stored: false,
-          error: `DB write failed: ${dbErr instanceof Error ? dbErr.message : 'unknown'}`,
-        })
-        failed++
-      }
-    } catch (e) {
+      stored++
       results.push({
-        shortlink,
+        shortlink: storedShortlink,
+        streamUrl,
+        quality,
+        format,
+        host,
+        fileName,
+        fileSize,
+        stored: true,
+      })
+    } catch (dbErr) {
+      results.push({
+        shortlink: storedShortlink,
+        streamUrl,
         stored: false,
-        error: e instanceof Error ? e.message : 'Failed to resolve',
+        error: `DB write failed: ${dbErr instanceof Error ? dbErr.message : 'unknown'}`,
       })
       failed++
     }
