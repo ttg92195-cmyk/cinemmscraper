@@ -266,7 +266,11 @@ async function searchCinemm(query, type) {
 // ---------------------------------------------------------------------------
 
 async function getMovieSources(id) {
-  const { lines } = await callAction(ACTIONS.getMovieSources, [String(id)])
+  // IMPORTANT: cinemm.com expects the movie ID as a NUMBER, not a string.
+  // Sending ["1234567"] (string) causes HTTP 500.
+  // Sending [1234567] (number) works and returns access:"direct" with servers.
+  const numericId = typeof id === 'string' ? parseInt(id, 10) : id
+  const { lines } = await callAction(ACTIONS.getMovieSources, [numericId])
   const raw = lines.get('1')
   if (!raw) return null
   try {
@@ -281,7 +285,9 @@ async function getMovieSources(id) {
 // ---------------------------------------------------------------------------
 
 async function getSeriesDetails(id) {
-  const { lines } = await callAction(ACTIONS.getSeriesDetails, [String(id), true])
+  // getSeriesDetailsAction expects (id: number, fetchOverview: boolean)
+  const numericSeriesId = typeof id === 'string' ? parseInt(id, 10) : id
+  const { lines } = await callAction(ACTIONS.getSeriesDetails, [numericSeriesId, true])
   const raw = lines.get('1')
   if (!raw) return null
   try {
@@ -298,7 +304,10 @@ async function getSeriesDetails(id) {
 // ---------------------------------------------------------------------------
 
 async function getEpisodeSources(episodeId) {
-  const { lines } = await callAction(ACTIONS.getEpisodeSources, [String(episodeId)])
+  // getEpisodeSourcesAction expects (episodeId: number, episodeNumber: number)
+  // We only have episodeId here — pass it as a number.
+  const numericEpId = typeof episodeId === 'string' ? parseInt(episodeId, 10) : episodeId
+  const { lines } = await callAction(ACTIONS.getEpisodeSources, [numericEpId])
   const raw = lines.get('1')
   if (!raw) return null
   try {

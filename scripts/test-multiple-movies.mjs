@@ -139,7 +139,7 @@ for (let i = 0; i < allMovies.length; i++) {
   const m = allMovies[i]
   console.log(`   [${i + 1}/${allMovies.length}] "${m.name}" (id: ${m.id}, query: "${m.query}")`)
   try {
-    const { status, lines, raw } = await callAction(ACTIONS.getMovieSources, [String(m.id)])
+    const { status, lines, raw } = await callAction(ACTIONS.getMovieSources, [Number(m.id)])
     if (status !== 200) {
       console.log(`      ❌ HTTP ${status}`)
       console.log(`      Body: ${raw.slice(0, 200)}`)

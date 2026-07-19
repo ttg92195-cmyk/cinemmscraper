@@ -644,7 +644,7 @@ export async function getMovieDetails(
   const retryDelays = [3000, 5000]
   for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
     // Call getMovieDetailsAction with fetchOverview=true to get the overview
-    const { lines: detailsLines } = await callAction(ACTIONS.getMovieServers, [id, true])
+    const { lines: detailsLines } = await callAction(ACTIONS.getMovieServers, [Number(id), true])
     const result = parseMovieDetailsResponse(detailsLines, { id, source, name, year, poster })
     
     // If rate-limited, wait and retry
@@ -655,8 +655,10 @@ export async function getMovieDetails(
     
     // Also call getMovieSourcesAction for servers — returns { ok, access, servers }
     // NEW: use proxy if configured — Myanmar IP returns access:"direct" with real URLs
+    // IMPORTANT: cinemm.com expects the movie ID as a NUMBER, not a string.
+    // Sending [String(id)] causes HTTP 500. Sending [Number(id)] works.
     try {
-      const { lines: sourceLines } = await callAction(ACTIONS.getMovieSources, [id], { useProxy: true })
+      const { lines: sourceLines } = await callAction(ACTIONS.getMovieSources, [Number(id)], { useProxy: true })
       const sourceRaw = sourceLines.get('1')
       if (sourceRaw) {
         const sourceParsed = JSON.parse(sourceRaw) as {
@@ -733,7 +735,7 @@ export async function getSeriesDetails(
   //   when fetchOverview=true, overview text comes back on line "2:" (T chunk)
   const retryDelays = [3000, 5000]
   for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
-    const { lines } = await callAction(ACTIONS.getSeriesDetails, [id, true])
+    const { lines } = await callAction(ACTIONS.getSeriesDetails, [Number(id), true])
 
     // Check for rate-limit response first
     const raw1 = lines.get('1') ?? ''
@@ -866,7 +868,7 @@ export async function getEpisodeServers(
   // Fetch with retry on rate-limit. On RATE_LIMITED, wait 2s then 4s and retry.
   const epRetryDelays = [2000, 4000]
   for (let attempt = 0; attempt <= epRetryDelays.length; attempt++) {
-    const { lines } = await callAction(ACTIONS.getEpisodeServers, [episodeId, source])
+    const { lines } = await callAction(ACTIONS.getEpisodeServers, [Number(episodeId), source])
     const result = parseEpisodeServersResponse(lines, episodeId)
     // If we got servers, cache and return
     if (result.servers.length > 0) {

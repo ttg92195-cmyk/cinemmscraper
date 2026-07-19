@@ -148,7 +148,7 @@ try {
       Referer: CINEMM_ORIGIN + '/',
       'Next-Action': '40f8eb1c1169207ffd4d06dd202d7580609061d2bb',
     },
-    body: JSON.stringify([String(movieId)]),
+    body: JSON.stringify([Number(movieId)]),
     signal: AbortSignal.timeout(20000),
   })
 
@@ -211,7 +211,7 @@ try {
       'Next-Action': '40f8eb1c1169207ffd4d06dd202d7580609061d2bb',
       Cookie: `user_uuid=${fakeUuid}`,
     },
-    body: JSON.stringify([String(movieId)]),
+    body: JSON.stringify([Number(movieId)]),
     signal: AbortSignal.timeout(20000),
   })
 

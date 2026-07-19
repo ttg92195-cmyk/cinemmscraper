@@ -154,7 +154,7 @@ console.log('')
 if (realMovieId !== null) {
   console.log(`🎬 Step 2: Call getMovieSourcesAction with movie ID ${realMovieId}...`)
   try {
-    const { lines, raw, status } = await callAction(ACTIONS.getMovieSources, [String(realMovieId)])
+    const { lines, raw, status } = await callAction(ACTIONS.getMovieSources, [Number(realMovieId)])
     console.log(`   HTTP status: ${status}`)
     const raw1 = lines.get('1')
     if (!raw1) {
@@ -201,7 +201,7 @@ try {
       const testId = discovered[0]
       console.log(`🎬 Step 3: Test with a discovered ID from crawler: ${testId}`)
       try {
-        const { lines, raw, status } = await callAction(ACTIONS.getMovieSources, [String(testId)])
+        const { lines, raw, status } = await callAction(ACTIONS.getMovieSources, [Number(testId)])
         console.log(`   HTTP status: ${status}`)
         const raw1 = lines.get('1')
         if (!raw1) {
