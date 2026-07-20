@@ -64,3 +64,9 @@ upload/
 # misc scratch files
 prompt
 test
+
+# Export list output (Bro's local files)
+series-list.txt
+series-list.json
+movie-list.txt
+movie-list.json

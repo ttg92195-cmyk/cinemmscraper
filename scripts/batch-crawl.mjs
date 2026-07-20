@@ -231,6 +231,8 @@ function loadProgress() {
     if (!data.processedIds) data.processedIds = { movie: [], series: [] }
     if (!data.submittedCount) data.submittedCount = 0
     if (!data.failedCount) data.failedCount = 0
+    if (!data.seriesNames) data.seriesNames = {}
+    if (!data.movieNames) data.movieNames = {}
     return data
   } catch {
     return {
@@ -238,6 +240,8 @@ function loadProgress() {
       processedIds: { movie: [], series: [] },
       submittedCount: 0,
       failedCount: 0,
+      seriesNames: {},
+      movieNames: {},
       lastRun: null,
     }
   }
@@ -271,6 +275,25 @@ async function processMovie(id, progress) {
     console.log(`  ⏭️  No URLs in servers`)
     return { stored: 0, status: 'no-urls' }
   }
+
+  // Try to extract movie name from file names in stream URLs
+  // (e.g. "An.Autumn.Afternoon.1962.1080p.BluRay MPK.mp4" -> "An.Autumn.Afternoon")
+  if (!progress.movieNames) progress.movieNames = {}
+  if (!progress.movieNames[id]) {
+    const firstFileName = servers[0]?.filename || servers[0]?.name || ''
+    if (firstFileName) {
+      // Strip quality/format suffixes to get a rough title
+      const cleaned = firstFileName
+        .replace(/\.(mkv|mp4|avi|mov|webm).*$/i, '')
+        .replace(/\b(8K|4K|2160p|1080p|720p|480p|WEB-DL|BluRay|HDTV|HEVC|AVC|CM|MPK|MW|YK|TRUE|Edit)\b.*$/i, '')
+        .replace(/[._]/g, ' ')
+        .trim()
+      if (cleaned) progress.movieNames[id] = cleaned
+    }
+  }
+  const movieName = progress.movieNames[id] || '(unknown)'
+  console.log(`  🎬 "${movieName}"`)
+
   try {
     const result = await submitToRailwayWithRetry(id, 'movie', null, urls)
     progress.submittedCount += result.stored || 0
@@ -305,7 +328,21 @@ async function processSeries(id, progress) {
     return { stored: 0, status: 'no-seasons' }
   }
 
-  console.log(`  📺 ${seasons.length} season(s)`)
+  // Series name comes from search results, not getSeriesDetails.
+  // We try to fetch it via a search if not cached.
+  const seriesName = progress.seriesNames?.[id] || details.name || details.title || '(unknown)'
+  const totalEpisodesCount = seasons.reduce(
+    (sum, s) => sum + (s.episodes?.length || 0),
+    0,
+  )
+  console.log(`  📺 "${seriesName}" — ${seasons.length} season(s), ${totalEpisodesCount} episode(s)`)
+
+  // Cache the name if we got it fresh
+  if (!progress.seriesNames) progress.seriesNames = {}
+  if (seriesName !== '(unknown)' && !progress.seriesNames[id]) {
+    progress.seriesNames[id] = seriesName
+  }
+
   let totalStored = 0
   let totalEpisodes = 0
 
