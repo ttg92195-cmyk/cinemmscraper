@@ -6,7 +6,6 @@ import {
   type MediaType,
   type CinemmDetails,
 } from '@/lib/cinemm'
-import { fetchStreamUrlsFromBot } from '@/lib/telegram-cinemm'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -108,41 +107,12 @@ export async function GET(req: NextRequest) {
     })
 
     if (hasContent) {
-      // Found overview! Telegram bot auto-fetch is DISABLED for safety.
-      //
-      // WHY: Auto-messaging @cinemmbot on every request risks:
-      //   - Telegram FloodWait errors (rate limit)
-      //   - cinemm.com detecting suspicious activity → bot block
-      //   - Bro's burner account ban
-      //
-      // The shortlink resolver (/api/resolve-shortlink) + manual URL
-      // submission (/api/manual-link) is the primary way to get stream URLs.
-      // It's 100% reliable and doesn't touch the Telegram bot.
-      //
-      // To re-enable bot auto-fetch, set ?skipTelegram=false in the query.
-      let telegramStreamUrls: string[] = []
+      // Found overview + servers. Stream URLs come from the manual-link
+      // endpoint (submitted by Bro's phone crawler), not Telegram bot.
+      // The Telegram bot auto-fetch was disabled for safety reasons
+      // (FloodWait errors, bot detection, account ban risk).
+      const telegramStreamUrls: string[] = []
       const telegramCached = false
-      const skipTelegramParam = searchParams.get('skipTelegram') !== 'false'
-      if (!skipTelegramParam && servers.length === 0) {
-        // Only called when explicitly enabled via ?skipTelegram=false
-        try {
-          const tgResult = await fetchStreamUrlsFromBot(
-            type === 'movie' ? `w_m_${id}` : `w_s_${id}`,
-          )
-          telegramStreamUrls = tgResult.urls
-          attempts.push({
-            method: 'telegram-bot',
-            ok: telegramStreamUrls.length > 0,
-            error: tgResult.error,
-          })
-        } catch (e) {
-          attempts.push({
-            method: 'telegram-bot',
-            ok: false,
-            error: e instanceof Error ? e.message : 'Telegram bot fetch failed',
-          })
-        }
-      }
 
       // Found it! Return immediately.
       return NextResponse.json({
@@ -154,9 +124,7 @@ export async function GET(req: NextRequest) {
         source,
         overview,
         telegramLink,
-        streamUrls: telegramStreamUrls.length > 0
-          ? telegramStreamUrls
-          : servers.map((s) => s.url).filter(Boolean),
+        streamUrls: servers.map((s) => s.url).filter(Boolean),
         servers,
         telegramStreamUrls,
         telegramCached,

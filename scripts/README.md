@@ -1,113 +1,130 @@
 # cinemmscraper — Scripts
 
-## `crawl-from-phone.mjs` — Auto-crawl cinemm.com from your phone
+This folder contains all crawler scripts that run on Bro's phone (Termux).
 
-Runs on **Termux** (Android terminal emulator) using the phone's Myanmar data IP.
-Discovers all movies + series on cinemm.com, fetches their stream URLs, and
-submits them to the Railway server so every user sees them permanently.
+## 📱 Phone Crawler Scripts
 
-### Why this exists
+### `crawl-from-phone.mjs` — Discovery + Initial Crawl
 
-cinemm.com only shows the "Show Sources" button (and returns real stream URLs)
-when the request comes from a Myanmar IP. The Railway server is in a foreign
-datacenter, so it always gets `access:"telegram"` with no URLs.
-
-This script bridges that gap: **your phone fetches the URLs, the server stores them.**
-
-After running it once, every visitor to cinemmscraper sees stream links for every
-crawled movie — no proxy, no Telegram bot, no Myanmar IP required on the server.
-
-### One-time setup (on Termux)
+Runs on Termux using the phone's Myanmar data IP. Discovers all movie/series
+IDs on cinemm.com via alphabetical search, then processes each one to fetch
+stream URLs and submit them to Railway.
 
 ```bash
-pkg update && pkg upgrade -y
-pkg install nodejs git -y          # Node 18+ has built-in fetch
-git clone https://github.com/ttg92195-cmyk/cinemmscraper
+# One-time setup on Termux
+pkg update && pkg install nodejs git termux-api -y
+git clone https://github.com/ttg92195-cmyk/cinemmscraper.git
 cd cinemmscraper
-```
 
-> **No `npm install` needed.** The script uses only Node.js built-ins (`fs`, `fetch`).
-> The Railway server does all the database work.
-
-### Run
-
-```bash
+# Run discovery + processing (full)
 node scripts/crawl-from-phone.mjs
+
+# Fast discovery only (~30s, finds ~1000 movies)
+CRAWL_QUERY_MODE=single CRAWL_TYPES=movie,series node scripts/crawl-from-phone.mjs
+
+# Full discovery (~25min, finds ~6500 movies)
+CRAWL_QUERY_MODE=auto CRAWL_TYPES=movie,series node scripts/crawl-from-phone.mjs
 ```
 
-That's it. The script will:
+### `batch-crawl.mjs` — Process N Items at a Time (Recommended)
 
-1. **Discovery phase** — search cinemm.com alphabetically (`a`, `b`, ..., `9`)
-   to collect all movie + series IDs. Takes ~30 seconds at default 800ms delay.
-2. **Process phase** — for each ID, call `getMovieSourcesAction` (or
-   `getEpisodeSourcesAction` for series episodes). If `access:"direct"`,
-   submit the stream URLs to `${RAILWAY_URL}/api/manual-link`.
-3. **Resume** — saves progress to `./crawl-progress.json` every 10 items.
-   If you stop the script (Ctrl+C, phone sleeps, network drops), just re-run
-   it — it skips already-processed IDs.
-
-### Tuning
-
-Environment variables (all optional):
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `RAILAY_URL` | `https://cinemmscraper-production.up.railway.app` | Where to submit URLs |
-| `CRAWL_DELAY_MS` | `800` | Delay between cinemm.com requests (be polite) |
-| `CRAWL_PROGRESS` | `./crawl-progress.json` | Progress file path |
-| `CRAWL_TYPES` | `movie,series` | Comma-separated; can be just `movie` |
-| `CRAWL_QUERY_MODE` | `auto` | `single` (36 queries) / `double` (1296 queries) / `auto` |
-
-**`CRAWL_QUERY_MODE`:**
-- `single` — search single chars `a`-`z`, `0`-`9`. Fast (~30s) but only finds ~1000 movies.
-- `double` — search all 2-char combos `aa`-`99`. Slow (~20min) but finds ~20000 movies.
-- `auto` (default) — single first, then double-char only for letters that returned 30 results.
-
-For the full 20000-movie crawl, use `auto` (default) or `double`:
+After discovery is done, use this to process items in small batches. Already-
+processed items are auto-skipped.
 
 ```bash
-CRAWL_QUERY_MODE=double node scripts/crawl-from-phone.mjs
+node scripts/batch-crawl.mjs movie       # next 20 movies
+node scripts/batch-crawl.mjs series      # next 20 series
+node scripts/batch-crawl.mjs movie 50    # next 50 movies
+node scripts/batch-crawl.mjs series 1    # only 1 series (quick test)
 ```
 
-### Expected runtime
+Re-running continues from where you left off. If VPN IP gets blocked mid-batch:
+- `Ctrl+C` to stop
+- Switch VPN server (or wait 30 min for IP cooldown)
+- Re-run same command — picks up where it stopped
 
-- Discovery: 20–25 minutes (1296 queries × 800ms)
-- Movie processing: 20000 movies × ~1.5s each ≈ 8 hours
-- Series processing: varies (depends on episode count)
+### `export-list.mjs` — Export Discovered Items List with Names
 
-You can run it overnight. The phone screen can be off (Termux keeps running).
-Use `termux-wake-lock` to prevent Android from killing Termux:
+Reads `crawl-progress.json` and generates a human-readable list of all
+discovered movies/series with their names and season/episode counts.
 
 ```bash
-pkg install termux-api -y
-termux-wake-lock
-# ... run the crawler ...
-termux-wake-unlock   # when done
+node scripts/export-list.mjs             # both movies + series
+node scripts/export-list.mjs series      # only series
+node scripts/export-list.mjs movie       # only movies
+node scripts/export-list.mjs series 50   # only first 50 series
 ```
 
-### Verifying it works
+Outputs:
+- `series-list.txt` / `series-list.json`
+- `movie-list.txt` / `movie-list.json`
 
-While the script runs, check the Railway server:
+Names are cached in `crawl-progress.json` so subsequent runs are faster.
+
+### `rebuild-progress.mjs` — Recover Lost Progress from Railway DB
+
+If `crawl-progress.json` is lost or corrupt, this script rebuilds it by
+querying Railway DB directly (no calls to cinemm.com for sources).
 
 ```bash
-# See how many URLs are stored
-curl -s 'https://cinemmscraper-production.up.railway.app/api/manual-link?mediaId=0&mediaType=movie'
+node scripts/rebuild-progress.mjs              # both movies + series
+node scripts/rebuild-progress.mjs movie        # only movies
+node scripts/rebuild-progress.mjs series       # only series
 ```
 
-Or open the Web UI and search for any popular movie — it should now show
-stream links without you having to submit them manually.
+This is MUCH faster than re-crawling because:
+- No calls to cinemm.com's getMovieSources/getEpisodeSources
+- Just queries our own Railway DB
+- Marks IDs with stored URLs as 'processed'
 
-### Troubleshooting
+## 🔧 Diagnostic Scripts
 
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| `ECONNREFUSED` / `ETIMEDOUT` | Phone lost data connection | Wait, then re-run |
-| All movies return `access:"telegram"` | Phone IP is not Myanmar | Use Myanmar SIM data, disable Wi-Fi, disable any VPN |
-| `429` / `FloodWait` errors | cinemm.com is rate-limiting | `CRAWL_DELAY_MS=2000 node scripts/crawl-from-phone.mjs` |
-| Script crashes mid-way | Phone went to sleep | Re-run — progress is saved |
-| `Railway HTTP 500` | Server error (DB issue) | Check Railway logs; usually transient |
+### `diagnose-ip.mjs` — IP + cinemm.com Diagnostic
 
-### How the data flows
+Use this when crawl is failing to figure out why.
+
+```bash
+node scripts/diagnose-ip.mjs
+```
+
+Checks:
+- Your public IP + country
+- Whether cinemm.com is reachable
+- Whether getMovieSourcesAction returns valid response
+- Whether your IP gets `access:"direct"` (Myanmar) or `access:"telegram"` (foreign)
+
+### `find-action-ids-v2.mjs` — Find Current cinemm.com Action IDs
+
+cinemm.com periodically regenerates Server Action IDs (every few weeks).
+When this happens, all API calls start returning HTTP 500/404. Run this
+script to find the new IDs:
+
+```bash
+node scripts/find-action-ids-v2.mjs
+```
+
+Output: list of all 40+ hex strings found in cinemm.com's JS bundles,
+with context so we can identify which ones are action IDs.
+
+After finding new IDs, update them in:
+- `src/lib/cinemm.ts` (production code)
+- `scripts/batch-crawl.mjs`
+- `scripts/crawl-from-phone.mjs`
+- `scripts/rebuild-progress.mjs`
+- `scripts/export-list.mjs`
+
+## 📁 Files Generated (Local Only, NOT Committed)
+
+- `crawl-progress.json` — main progress file (discovered + processed IDs)
+- `crawl-progress.json.bak` — automatic backup (one save ago)
+- `crawl-progress.json.tmp` — temporary file during atomic writes
+- `crawl-progress.json.corrupt-*` — backup of corrupt file (if parse fails)
+- `series-list.txt` / `series-list.json` — output of export-list.mjs
+- `movie-list.txt` / `movie-list.json` — output of export-list.mjs
+
+These are all in `.gitignore` — they never get committed to GitHub.
+
+## 🌐 How the Data Flows
 
 ```
    Your phone (Termux, Myanmar IP)
@@ -130,19 +147,30 @@ stream links without you having to submit them manually.
             │     body: { mediaId:"...", mediaType:"movie", shortlinks:["https://...mp4"] }
             │
             ↓
-   Railway server stores URLs permanently in SQLite
+   Railway server stores URLs permanently in SQLite (Railway Volume)
             │
             ↓
    Every future visitor to cinemmscraper sees the URLs
 ```
 
-### Files written
+## ⚙️ Environment Variables (All Optional)
 
-- `./crawl-progress.json` — progress file (discovered IDs + processed IDs + counts)
-  - Safe to delete to start over, but you'll redo all the discovery work
-- `./crawl-progress.json.bak` — backup (created on each save, optional)
+| Variable | Default | Description |
+|---|---|---|
+| `RAILWAY_URL` | `https://cinemmscraper-production.up.railway.app` | Railway production URL |
+| `CRAWL_DELAY_MS` | `800` (crawl-from-phone) / `2000` (batch-crawl) | Delay between cinemm.com requests |
+| `CRAWL_PROGRESS` | `./crawl-progress.json` | Progress file path |
+| `CRAWL_TYPES` | `movie,series` | Comma-separated; can be just `movie` |
+| `CRAWL_QUERY_MODE` | `auto` | `single` (fast, ~1000 movies) / `double` (slow, ~20000) / `auto` |
 
-### Other scripts in this folder
+## 🚨 Troubleshooting
 
-- `telegram-login.mjs` — one-time setup to log into Telegram as @cinemmbot
-  (only needed if you want to use the Telegram bot auto-fetch feature)
+| Symptom | Cause | Fix |
+|---|---|---|
+| `ECONNREFUSED` / `ETIMEDOUT` | Phone lost data connection | Wait, then re-run |
+| All movies return `access:"telegram"` | Phone IP is not Myanmar | Use Myanmar SIM data, disable Wi-Fi, disable any VPN |
+| `429` / `FloodWait` errors | cinemm.com is rate-limiting | `CRAWL_DELAY_MS=2000 node scripts/batch-crawl.mjs movie` |
+| All movies return HTTP 500/404 | cinemm.com changed Action IDs | `node scripts/find-action-ids-v2.mjs` and update code |
+| Script crashes mid-way | Phone went to sleep | Re-run — progress is auto-saved |
+| Progress file corrupt | Termux killed mid-write | `node scripts/rebuild-progress.mjs` to recover from Railway |
+| Railway HTTP 502 | Cold start (free tier) | Wait 30s, retry — script auto-retries 3× |

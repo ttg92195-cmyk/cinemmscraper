@@ -4,24 +4,3 @@ healthcheckPath = "/"
 healthcheckTimeout = 60
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
-
-# Backup cron worker — runs daily backup script
-# This creates a separate worker service on Railway that wakes up on schedule,
-# runs the backup, then exits. Doesn't compete with the web service for memory.
-#
-# To enable on Railway:
-#   1. Go to your Railway project → New Service → GitHub Repo (same repo)
-#   2. Set Service Name: "backup-worker"
-#   3. Set Root Directory: / (same as web service)
-#   4. Set Start Command: sh -c "apk add --no-cache git findutils && ./scripts/backup-db.sh"
-#      (Note: Railway's Node image may not have git/find by default)
-#   5. Add env vars:
-#      BACKUP_GITHUB_TOKEN = ghp_xxxxx
-#      BACKUP_GITHUB_REPO  = ttg92195-cmyk/cinemmscraper-backup
-#   6. Set up a CRON schedule on Railway dashboard:
-#      - Service settings → Cron Jobs → Add
-#      - Schedule: "0 4 * * *" (daily at 4:00 AM UTC)
-#      - Command: ./scripts/backup-db.sh
-#
-# Alternative: use a cron package on the main web service
-# (less reliable — main service might be sleeping when cron fires)
