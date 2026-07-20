@@ -377,27 +377,66 @@ async function submitToRailwayWithRetry(mediaId, mediaType, episodeId, streamUrl
 // ---------------------------------------------------------------------------
 
 function loadProgress() {
+  // CRITICAL: Never return empty progress on parse failure — that would
+  // cause saveProgress() to overwrite the (possibly corrupt) file with
+  // empty data, destroying hours of work. Instead, ABORT with a clear
+  // error message so Bro can manually inspect/recover the file.
+  let raw
   try {
-    const data = JSON.parse(fs.readFileSync(PROGRESS_FILE, 'utf8'))
-    if (!data.discoveredIds) data.discoveredIds = { movie: [], series: [] }
-    if (!data.processedIds) data.processedIds = { movie: [], series: [] }
-    if (!data.submittedCount) data.submittedCount = 0
-    if (!data.failedCount) data.failedCount = 0
-    return data
-  } catch {
-    return {
-      discoveredIds: { movie: [], series: [] },
-      processedIds: { movie: [], series: [] },
-      submittedCount: 0,
-      failedCount: 0,
-      lastRun: null,
+    raw = fs.readFileSync(PROGRESS_FILE, 'utf8')
+  } catch (e) {
+    if (e.code === 'ENOENT') {
+      // File doesn't exist yet — first run.
+      return {
+        discoveredIds: { movie: [], series: [] },
+        processedIds: { movie: [], series: [] },
+        submittedCount: 0,
+        failedCount: 0,
+        lastRun: null,
+      }
     }
+    throw e
   }
+
+  let data
+  try {
+    data = JSON.parse(raw)
+  } catch (e) {
+    // File is corrupt — DON'T return empty progress (would overwrite).
+    const backupPath = `${PROGRESS_FILE}.corrupt-${Date.now()}`
+    try { fs.writeFileSync(backupPath, raw) } catch {}
+    console.error(`\n❌ FATAL: ${PROGRESS_FILE} is corrupt (JSON parse failed).`)
+    console.error(`   Backed up to: ${backupPath}`)
+    console.error(`   Aborting to prevent data loss.\n`)
+    process.exit(1)
+  }
+
+  if (!data.discoveredIds) data.discoveredIds = { movie: [], series: [] }
+  if (!data.processedIds) data.processedIds = { movie: [], series: [] }
+  if (!data.submittedCount) data.submittedCount = 0
+  if (!data.failedCount) data.failedCount = 0
+  if (!data.seriesNames) data.seriesNames = {}
+  if (!data.movieNames) data.movieNames = {}
+  return data
 }
 
 function saveProgress(p) {
   p.lastRun = new Date().toISOString()
-  fs.writeFileSync(PROGRESS_FILE, JSON.stringify(p, null, 2))
+  const jsonStr = JSON.stringify(p, null, 2)
+
+  // Atomic write: write to temp, rename to real.
+  // Backup current file to .bak before overwriting.
+  try {
+    try {
+      const current = fs.readFileSync(PROGRESS_FILE, 'utf8')
+      fs.writeFileSync(`${PROGRESS_FILE}.bak`, current)
+    } catch {}
+    const tmpPath = `${PROGRESS_FILE}.tmp`
+    fs.writeFileSync(tmpPath, jsonStr)
+    fs.renameSync(tmpPath, PROGRESS_FILE)
+  } catch (e) {
+    console.error(`\n⚠️  Failed to save progress: ${e.message}`)
+  }
 }
 
 // ---------------------------------------------------------------------------

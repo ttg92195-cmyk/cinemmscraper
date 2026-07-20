@@ -225,31 +225,90 @@ async function submitToRailwayWithRetry(mediaId, mediaType, episodeId, streamUrl
 
 // ---------- Progress file I/O ----------
 function loadProgress() {
+  // CRITICAL: Never return empty progress on parse failure — that would
+  // cause saveProgress() to overwrite the (possibly corrupt) file with
+  // empty data, destroying hours of work. Instead, ABORT with a clear
+  // error message so Bro can manually inspect/recover the file.
+  let raw
   try {
-    const data = JSON.parse(fs.readFileSync(PROGRESS_FILE, 'utf8'))
-    if (!data.discoveredIds) data.discoveredIds = { movie: [], series: [] }
-    if (!data.processedIds) data.processedIds = { movie: [], series: [] }
-    if (!data.submittedCount) data.submittedCount = 0
-    if (!data.failedCount) data.failedCount = 0
-    if (!data.seriesNames) data.seriesNames = {}
-    if (!data.movieNames) data.movieNames = {}
-    return data
-  } catch {
-    return {
-      discoveredIds: { movie: [], series: [] },
-      processedIds: { movie: [], series: [] },
-      submittedCount: 0,
-      failedCount: 0,
-      seriesNames: {},
-      movieNames: {},
-      lastRun: null,
+    raw = fs.readFileSync(PROGRESS_FILE, 'utf8')
+  } catch (e) {
+    if (e.code === 'ENOENT') {
+      // File doesn't exist yet — this is the FIRST run, so empty progress is correct.
+      console.log(`  ℹ️  ${PROGRESS_FILE} not found — starting fresh (first run)`)
+      return {
+        discoveredIds: { movie: [], series: [] },
+        processedIds: { movie: [], series: [] },
+        submittedCount: 0,
+        failedCount: 0,
+        seriesNames: {},
+        movieNames: {},
+        lastRun: null,
+      }
     }
+    throw e
   }
+
+  let data
+  try {
+    data = JSON.parse(raw)
+  } catch (e) {
+    // File is corrupt — DON'T return empty progress (would overwrite).
+    // Save a backup of the corrupt file so Bro can recover, then abort.
+    const backupPath = `${PROGRESS_FILE}.corrupt-${Date.now()}`
+    try {
+      fs.writeFileSync(backupPath, raw)
+    } catch {}
+    console.error(`\n❌ FATAL: ${PROGRESS_FILE} is corrupt (JSON parse failed).`)
+    console.error(`   Backed up to: ${backupPath}`)
+    console.error(`   Manual recovery options:`)
+    console.error(`     1. Inspect the backup file: cat ${backupPath} | head -50`)
+    console.error(`     2. If mostly intact, fix the JSON manually and rename to ${PROGRESS_FILE}`)
+    console.error(`     3. If unrecoverable, delete it and re-run discovery phase`)
+    console.error(`   Aborting to prevent data loss.\n`)
+    process.exit(1)
+  }
+
+  if (!data.discoveredIds) data.discoveredIds = { movie: [], series: [] }
+  if (!data.processedIds) data.processedIds = { movie: [], series: [] }
+  if (!data.submittedCount) data.submittedCount = 0
+  if (!data.failedCount) data.failedCount = 0
+  if (!data.seriesNames) data.seriesNames = {}
+  if (!data.movieNames) data.movieNames = {}
+  return data
 }
 
 function saveProgress(p) {
   p.lastRun = new Date().toISOString()
-  fs.writeFileSync(PROGRESS_FILE, JSON.stringify(p, null, 2))
+  const jsonStr = JSON.stringify(p, null, 2)
+
+  // Atomic write strategy:
+  //   1. Write to a temp file (PROGRESS_FILE.tmp)
+  //   2. If write succeeds, rename to the real file
+  //   3. If a previous .bak exists, leave it (it's the backup from 2 saves ago)
+  //
+  // Additionally, before writing, we back up the current file to .bak
+  // so we always have the previous version recoverable.
+  try {
+    // Back up current file (if it exists) to .bak
+    try {
+      const current = fs.readFileSync(PROGRESS_FILE, 'utf8')
+      fs.writeFileSync(`${PROGRESS_FILE}.bak`, current)
+    } catch {
+      // No current file — that's fine for the first save
+    }
+
+    // Write to temp file first
+    const tmpPath = `${PROGRESS_FILE}.tmp`
+    fs.writeFileSync(tmpPath, jsonStr)
+
+    // Atomic rename to real file (POSIX atomic on same filesystem)
+    fs.renameSync(tmpPath, PROGRESS_FILE)
+  } catch (e) {
+    console.error(`\n⚠️  Failed to save progress: ${e.message}`)
+    console.error(`   Progress data is in memory only — will be lost on exit.`)
+    console.error(`   Last successful save: ${p.lastRun}`)
+  }
 }
 
 // ---------- Processors ----------

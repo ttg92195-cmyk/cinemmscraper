@@ -273,7 +273,23 @@ async function main() {
     process.exit(0)
   }
 
-  const progress = JSON.parse(fs.readFileSync(PROGRESS_FILE, 'utf8'))
+  let progress
+  try {
+    progress = JSON.parse(fs.readFileSync(PROGRESS_FILE, 'utf8'))
+  } catch (e) {
+    if (e.code === 'ENOENT') {
+      console.error(`❌ ${PROGRESS_FILE} not found. Run discovery first:`)
+      console.error(`   node scripts/crawl-from-phone.mjs`)
+      process.exit(1)
+    }
+    console.error(`❌ ${PROGRESS_FILE} is corrupt: ${e.message}`)
+    console.error(`   Backing up to ${PROGRESS_FILE}.corrupt-${Date.now()} and aborting.`)
+    try {
+      const raw = fs.readFileSync(PROGRESS_FILE, 'utf8')
+      fs.writeFileSync(`${PROGRESS_FILE}.corrupt-${Date.now()}`, raw)
+    } catch {}
+    process.exit(1)
+  }
   console.log('═══════════════════════════════════════════════════════')
   console.log('  Export discovered items list with names')
   console.log('═══════════════════════════════════════════════════════\n')
@@ -384,8 +400,18 @@ async function main() {
     progress[`${type}Names`] = cachedNames
   }
 
-  // Persist updated name caches
-  fs.writeFileSync(PROGRESS_FILE, JSON.stringify(progress, null, 2))
+  // Persist updated name caches (atomic write with backup)
+  try {
+    try {
+      const current = fs.readFileSync(PROGRESS_FILE, 'utf8')
+      fs.writeFileSync(`${PROGRESS_FILE}.bak`, current)
+    } catch {}
+    const tmpPath = `${PROGRESS_FILE}.tmp`
+    fs.writeFileSync(tmpPath, JSON.stringify(progress, null, 2))
+    fs.renameSync(tmpPath, PROGRESS_FILE)
+  } catch (e) {
+    console.error(`⚠️  Failed to save progress: ${e.message}`)
+  }
   console.log(`\n✅ Updated name caches in ${PROGRESS_FILE}`)
   console.log('\n═══════════════════════════════════════════════════════')
   console.log('  Done!')
