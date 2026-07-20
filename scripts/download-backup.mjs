@@ -74,7 +74,7 @@ async function main() {
   const sizeMB = (Buffer.byteLength(text) / (1024 * 1024)).toFixed(2)
 
   // Parse to validate + extract stats
-  let backup: any
+  let backup
   try {
     backup = JSON.parse(text)
   } catch {
