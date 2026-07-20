@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getCache, setCache } from '@/lib/cache'
 
 export const runtime = 'nodejs'
-export const maxDuration = 30
+export const maxDuration = 10
 
 /**
  * GET /api/resolve-shortlink?url=<shortlink>

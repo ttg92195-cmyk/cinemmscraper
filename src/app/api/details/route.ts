@@ -4,7 +4,7 @@ import { db, ensureSchema } from '@/lib/db'
 import { sortStreamUrlsByHostPreference } from '@/lib/stream-url-sort'
 
 export const runtime = 'nodejs'
-export const maxDuration = 60
+export const maxDuration = 10
 
 /**
  * GET /api/details?id=<num>&type=<movie|series>&source=<CM>&name=<...>&year=<...>&poster=<...>

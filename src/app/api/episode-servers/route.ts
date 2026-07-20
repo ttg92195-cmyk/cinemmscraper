@@ -4,7 +4,7 @@ import { db, ensureSchema } from '@/lib/db'
 import { sortStreamUrlsByHostPreference } from '@/lib/stream-url-sort'
 
 export const runtime = 'nodejs'
-export const maxDuration = 30
+export const maxDuration = 10
 
 /**
  * GET /api/episode-servers?episodeId=<num>&source=<CM>&mediaId=<seriesId>&mediaType=series

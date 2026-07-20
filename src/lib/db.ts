@@ -1,6 +1,4 @@
 import { PrismaClient } from '@prisma/client'
-import fs from 'fs'
-import path from 'path'
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined
@@ -8,40 +6,46 @@ const globalForPrisma = globalThis as unknown as {
 }
 
 /**
- * Resolve the SQLite database file path.
+ * Resolve the database connection URL.
  *
- * Order of precedence:
- *   1. DATABASE_URL env var (if set and starts with "file:")
- *   2. /app/db/custom.db (Railway production — /app is the working dir)
- *   3. ./db/custom.db (local dev)
+ * For Postgres (Vercel + Supabase): DATABASE_URL is a postgresql:// URL
+ * set in the environment. We just pass it through to Prisma.
  *
- * The directory is created if it doesn't exist (Railway ephemeral filesystem
- * doesn't always have /app/db pre-created).
+ * For legacy SQLite (Railway): DATABASE_URL was file:/app/db/custom.db.
+ * This is no longer supported after the Postgres migration — if you see
+ * a file: URL here, the deployment is misconfigured.
+ *
+ * Build-time safety: if DATABASE_URL is not set (e.g. during `next build`
+ * on Vercel before env vars are attached), we return a placeholder URL
+ * that lets Prisma client generate but won't actually connect. Real
+ * runtime errors will surface from Prisma itself with a clearer message.
  */
 function resolveDatabaseUrl(): string {
   const envUrl = process.env.DATABASE_URL
-  if (envUrl && envUrl.startsWith('file:')) {
-    const filePath = envUrl.replace(/^file:/, '')
-    const dir = path.dirname(filePath)
-    try {
-      fs.mkdirSync(dir, { recursive: true })
-    } catch {}
-    return envUrl
+  if (!envUrl) {
+    // Build-time or misconfigured runtime — return placeholder so Prisma
+    // client can be constructed without throwing during build collection.
+    if (process.env.NEXT_PHASE === 'phase-production-build') {
+      console.warn('[db] DATABASE_URL not set during build — using placeholder')
+      return 'postgresql://placeholder:placeholder@placeholder:5432/placeholder'
+    }
+    // Real runtime without DATABASE_URL — throw with a helpful message
+    throw new Error(
+      'DATABASE_URL env var is required. Set it to a postgresql:// connection string (Supabase, Neon, etc.)',
+    )
   }
-  // Fallback: /app/db/custom.db (Railway) or ./db/custom.db (local)
-  const isProduction = process.env.NODE_ENV === 'production'
-  const filePath = isProduction ? '/app/db/custom.db' : './db/custom.db'
-  const dir = path.dirname(filePath)
-  try {
-    fs.mkdirSync(dir, { recursive: true })
-  } catch {}
-  return `file:${filePath}`
+  if (envUrl.startsWith('file:')) {
+    throw new Error(
+      'SQLite (file: URLs) is no longer supported. Migrate to Postgres by setting DATABASE_URL to a postgresql:// URL.',
+    )
+  }
+  return envUrl
 }
 
 const databaseUrl = resolveDatabaseUrl()
 
-// Disable query logging in dev to reduce overhead (every cache read/write
-// was being logged, which slows down the dev server noticeably).
+// Use a single Prisma client per process (avoid exhausting connections in
+// serverless environments like Vercel).
 export const db =
   globalForPrisma.prisma ??
   new PrismaClient({
@@ -51,24 +55,24 @@ export const db =
     },
   })
 
+// Cache the client across hot-reloads in dev
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = db
 
 /**
- * Ensure all required tables AND columns exist in the SQLite database.
+ * Ensure all required tables AND columns exist in the Postgres database.
  *
- * Why: Railway's filesystem is ephemeral — the SQLite file resets on every
- * deploy (unless a persistent volume is mounted). Prisma's `db push` only
- * runs at build time, so the tables exist in the build image but get wiped
- * at runtime. This function runs raw `CREATE TABLE IF NOT EXISTS` SQL on
- * first DB access, ensuring the tables always exist.
+ * Why: Vercel serverless functions are stateless — there's no migration
+ * step at deploy time. This function runs raw `CREATE TABLE IF NOT EXISTS`
+ * SQL on first DB access, ensuring the tables always exist.
  *
- * It also runs `ALTER TABLE ADD COLUMN IF NOT EXISTS` for any columns that
- * were added in later schema versions (e.g. episodeId was added after the
- * initial ManualStreamUrl table was created). SQLite doesn't support
- * `IF NOT EXISTS` on ADD COLUMN, so we check PRAGMA table_info first.
+ * Postgres notes:
+ *   - Supports `ADD COLUMN IF NOT EXISTS` natively (unlike SQLite)
+ *   - We query `information_schema.columns` instead of `PRAGMA table_info`
+ *   - `DATETIME` becomes `TIMESTAMP` (Postgres naming)
+ *   - `BOOLEAN NOT NULL DEFAULT false` works the same
  *
  * Idempotent: safe to call multiple times. The `prismaSchemaEnsured` flag
- * prevents re-running the SQL on every request.
+ * prevents re-running the SQL on every request within the same process.
  */
 export async function ensureSchema(): Promise<void> {
   if (globalForPrisma.prismaSchemaEnsured) return
@@ -81,8 +85,8 @@ export async function ensureSchema(): Promise<void> {
         "id" TEXT NOT NULL PRIMARY KEY,
         "cacheKey" TEXT NOT NULL UNIQUE,
         "payload" TEXT NOT NULL,
-        "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
       )
     `)
     await db.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "CinemmCache_cacheKey_idx" ON "CinemmCache"("cacheKey")`)
@@ -101,31 +105,16 @@ export async function ensureSchema(): Promise<void> {
         "host" TEXT NOT NULL,
         "fileName" TEXT NOT NULL,
         "fileSize" TEXT NOT NULL DEFAULT 'N/A',
-        "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        "expiresAt" DATETIME NOT NULL
+        "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        "expiresAt" TIMESTAMP(3) NOT NULL
       )
     `)
     await db.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "ManualStreamUrl_mediaId_mediaType_episodeId_idx" ON "ManualStreamUrl"("mediaId", "mediaType", "episodeId")`)
 
-    // MIGRATION: For existing ManualStreamUrl tables created before episodeId
-    // was added, add the column now. SQLite doesn't support ADD COLUMN IF NOT
-    // EXISTS, so we check PRAGMA table_info first.
-    const columns = await db.$queryRaw<Array<{ name: string }>>`
-      PRAGMA table_info("ManualStreamUrl")
-    `
-    const columnNames = columns.map((c) => c.name)
-    if (!columnNames.includes('episodeId')) {
-      console.log('[db] Migrating ManualStreamUrl: adding episodeId column')
-      await db.$executeRawUnsafe(`
-        ALTER TABLE "ManualStreamUrl" ADD COLUMN "episodeId" TEXT
-      `)
-    }
-    if (!columnNames.includes('fileSize')) {
-      console.log('[db] Migrating ManualStreamUrl: adding fileSize column')
-      await db.$executeRawUnsafe(`
-        ALTER TABLE "ManualStreamUrl" ADD COLUMN "fileSize" TEXT NOT NULL DEFAULT 'N/A'
-      `)
-    }
+    // MIGRATION: For existing tables created before episodeId/fileSize were
+    // added. Postgres supports ADD COLUMN IF NOT EXISTS natively.
+    await db.$executeRawUnsafe(`ALTER TABLE "ManualStreamUrl" ADD COLUMN IF NOT EXISTS "episodeId" TEXT`)
+    await db.$executeRawUnsafe(`ALTER TABLE "ManualStreamUrl" ADD COLUMN IF NOT EXISTS "fileSize" TEXT NOT NULL DEFAULT 'N/A'`)
 
     // User and Post tables (from default schema — may not be used but kept for compat)
     await db.$executeRawUnsafe(`
@@ -133,8 +122,8 @@ export async function ensureSchema(): Promise<void> {
         "id" TEXT NOT NULL PRIMARY KEY,
         "email" TEXT NOT NULL UNIQUE,
         "name" TEXT,
-        "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
       )
     `)
     await db.$executeRawUnsafe(`
@@ -144,20 +133,18 @@ export async function ensureSchema(): Promise<void> {
         "content" TEXT,
         "published" BOOLEAN NOT NULL DEFAULT false,
         "authorId" TEXT NOT NULL,
-        "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
       )
     `)
 
     // MIGRATION: Update all existing ManualStreamUrl entries to have
     // permanent expiry (year 9999). Previously they had 7-day TTL.
-    // Bro requested permanent storage — no URLs should ever expire.
     try {
       const farFuture = new Date('9999-12-31T23:59:59.000Z')
       await db.$executeRawUnsafe(
-        `UPDATE "ManualStreamUrl" SET "expiresAt" = ? WHERE "expiresAt" < ?`,
-        farFuture.toISOString(),
-        farFuture.toISOString(),
+        `UPDATE "ManualStreamUrl" SET "expiresAt" = $1 WHERE "expiresAt" < $1`,
+        farFuture,
       )
     } catch {
       // Migration failed (e.g. table doesn't exist yet) — ignore, will retry next time
@@ -167,11 +154,11 @@ export async function ensureSchema(): Promise<void> {
   } catch (e) {
     console.error('[db] ensureSchema failed:', e instanceof Error ? e.message : e)
     // Don't throw — let the request fail naturally if tables really are missing.
-    // The error will be more descriptive from Prisma itself.
   }
 }
 
 // Auto-ensure schema on first DB access in production
-if (process.env.NODE_ENV === 'production') {
+// (skipped during build — NEXT_PHASE is set by Vercel/Next.js)
+if (process.env.NODE_ENV === 'production' && process.env.NEXT_PHASE !== 'phase-production-build') {
   ensureSchema().catch(() => {})
 }

@@ -8,7 +8,7 @@ import {
 } from '@/lib/cinemm'
 
 export const runtime = 'nodejs'
-export const maxDuration = 60
+export const maxDuration = 10
 
 /**
  * GET /api/scrape-movie?id=<num>&type=<movie|series>&source=<CM>&name=<...>

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 
 export const runtime = 'nodejs'
-export const maxDuration = 15
+export const maxDuration = 10
 
 /**
  * GET /api/img?url=<cinemm.com-image-url>

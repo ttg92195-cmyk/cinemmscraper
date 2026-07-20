@@ -4,7 +4,7 @@ import path from 'path'
 import { db, ensureSchema } from '@/lib/db'
 
 export const runtime = 'nodejs'
-export const maxDuration = 60
+export const maxDuration = 10
 
 /**
  * GET /api/backup-db?token=<BACKUP_TOKEN>

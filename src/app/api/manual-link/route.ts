@@ -3,7 +3,7 @@ import { db, ensureSchema } from '@/lib/db'
 import { sortStreamUrlsByHostPreference } from '@/lib/stream-url-sort'
 
 export const runtime = 'nodejs'
-export const maxDuration = 60
+export const maxDuration = 10
 
 // Ensure DB tables exist before any request (Railway ephemeral filesystem)
 async function ensureDb() {
