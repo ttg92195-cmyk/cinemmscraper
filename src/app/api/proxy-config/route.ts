@@ -188,21 +188,29 @@ async function updateTestResult(config: ProxyConfig, ok: boolean, result: string
 /**
  * Create a Node.js HTTP agent that routes through the proxy.
  * Supports both plain HTTP proxies and authenticated proxies.
+ *
+ * Uses undici's ProxyAgent (built into Node 18+ / Next.js). If undici is
+ * unavailable, returns undefined and the caller falls back to direct fetch.
+ *
+ * Note: This is a synchronous function because fetch()'s `agent` option
+ * requires a value, not a Promise. We use createRequire to dynamically
+ * load undici at runtime without TypeScript/Rollup trying to resolve it
+ * at build time.
  */
 function createProxyAgent(proxyUrl: string): import('http').Agent | undefined {
   try {
-    // Use undici's ProxyAgent (available in Node 18+ / Next.js)
-    // We import dynamically to avoid issues if not available
-    const { ProxyAgent } = require('undici')
-    return new ProxyAgent(proxyUrl)
-  } catch {
-    // Fallback: try http-proxy-agent
-    try {
-      const { HttpProxyAgent } = require('http-proxy-agent')
-      return new HttpProxyAgent(proxyUrl)
-    } catch {
-      console.error('[proxy] No proxy agent available — install undici or http-proxy-agent')
-      return undefined
+    // Use Node's built-in createRequire to load undici at runtime.
+    // This avoids the bundler trying to statically resolve 'undici'
+    // (which IS a Node built-in module but TypeScript may not see it).
+    const module = require('module')
+    const require_ = module.createRequire(import.meta.url || __filename)
+    const undici = require_('undici')
+    if (undici && typeof undici.ProxyAgent === 'function') {
+      return new undici.ProxyAgent(proxyUrl)
     }
+  } catch {
+    // undici not available — fall through
   }
+  console.error('[proxy] No proxy agent available — undici is required (Node 18+)')
+  return undefined
 }

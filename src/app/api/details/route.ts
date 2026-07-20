@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getDetails, type MediaType } from '@/lib/cinemm'
-import { fetchStreamUrlsFromBot } from '@/lib/telegram-cinemm'
 import { db, ensureSchema } from '@/lib/db'
 import { sortStreamUrlsByHostPreference } from '@/lib/stream-url-sort'
 
@@ -14,13 +13,12 @@ export const maxDuration = 60
  *   - Movie: name, year, poster, overview, servers[], remaining quota
  *   - Series: name, year, poster, overview (long text with seasons/episodes), episodeImageUrls[]
  *
- * Stream URLs (3 sources, tried in order):
+ * Stream URLs (2 sources, tried in order):
  *   1. cinemm.com getMovieSourcesAction — currently returns access="telegram", servers=[]
  *   2. ManualStreamUrl table — URLs Bro submitted via /api/manual-link
- *      (persists 7 days, shared across all users)
- *   3. Telegram bot @cinemmbot — automatic fallback (if session is configured)
+ *      (persists permanently, shared across all users)
  *
- * All three are returned in the response so the UI can show whichever is available.
+ * Both are returned in the response so the UI can show whichever is available.
  */
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url)
@@ -32,8 +30,6 @@ export async function GET(req: NextRequest) {
   const poster = searchParams.get('poster') ?? ''
   const useCache = searchParams.get('cache') !== 'false'
   const visitorUuid = searchParams.get('uuid') || null
-  // Set skipTelegram=true to skip the bot integration (faster, no Telegram hit)
-  const skipTelegram = searchParams.get('skipTelegram') === 'true'
 
   const id = parseInt(idStr, 10)
   if (!Number.isFinite(id) || id <= 0) {
@@ -56,38 +52,12 @@ export async function GET(req: NextRequest) {
       { useCache, visitorUuid },
     ) as any
 
-    // Step 2: Telegram bot auto-fetch is DISABLED by default.
-    //
-    // WHY: Previously, every /api/details call would auto-message @cinemmbot
-    // to fetch stream URLs. This is dangerous because:
-    //   1. High message volume → Telegram FloodWait errors
-    //   2. cinemm.com (bot owner) may detect suspicious activity
-    //   3. Bro's burner account could get banned
-    //   4. cinemm.com could block the bot entirely
-    //
-    // The shortlink resolver (/api/resolve-shortlink) + manual URL submission
-    // (/api/manual-link) is now the primary way to get stream URLs — it's
-    // 100% reliable and doesn't touch the Telegram bot at all.
-    //
-    // To re-enable bot auto-fetch, set ?skipTelegram=false explicitly
-    // (e.g. for testing). By default, skipTelegram defaults to true here.
-    let telegramStreamUrls: string[] = []
-    let telegramError: string | null = null
-    let telegramCached = false
-    const hasServers = 'servers' in details && details.servers && details.servers.length > 0
-    // Default: skip Telegram bot (safety). Only enable if explicitly requested.
-    const effectiveSkipTelegram = skipTelegram !== false ? true : false
-    if (!effectiveSkipTelegram && !hasServers) {
-      try {
-        const deepLink = type === 'movie' ? `w_m_${id}` : `w_s_${id}`
-        const tgResult = await fetchStreamUrlsFromBot(deepLink)
-        telegramStreamUrls = tgResult.urls
-        telegramCached = tgResult.cached
-        telegramError = tgResult.error ?? null
-      } catch (e) {
-        telegramError = e instanceof Error ? e.message : 'Telegram bot fetch failed'
-      }
-    }
+    // Telegram bot auto-fetch is DISABLED (removed in cleanup commit).
+    // Stream URLs come from ManualStreamUrl table (submitted by phone crawler)
+    // and from cinemm.com's getMovieSourcesAction (when called from Myanmar IP).
+    const telegramStreamUrls: string[] = []
+    const telegramError: string | null = null
+    const telegramCached = false
 
     // Fetch manually-submitted stream URLs from the ManualStreamUrl table.
     // For movies: returns URLs stored at movie level (episodeId is null).
@@ -102,6 +72,7 @@ export async function GET(req: NextRequest) {
       format: string
       host: string
       fileName: string
+      fileSize: string
       createdAt: string
       expiresAt: string
     }> = []
