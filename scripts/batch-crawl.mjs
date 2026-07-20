@@ -56,7 +56,11 @@ const COMMON_HEADERS = {
   Origin: CINEMM_ORIGIN,
 }
 
-const DELAY_MS = parseInt(process.env.CRAWL_DELAY_MS || '2000', 10)
+const DELAY_MS = parseInt(process.env.CRAWL_DELAY_MS || '1500', 10)
+// Number of movies/series to process in parallel. Each makes its own
+// cinemm.com + Railway calls, so 3 parallel = ~3x faster than sequential.
+// Higher than 3 risks cinemm.com rate-limiting (HTTP 429/500).
+const CONCURRENCY = parseInt(process.env.CRAWL_CONCURRENCY || '3', 10)
 const PROGRESS_FILE = process.env.CRAWL_PROGRESS || './crawl-progress.json'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -115,7 +119,10 @@ let consecutive500Errors = 0
 
 async function callAction(actionId, args) {
   const retryStatuses = [429, 500, 502, 503, 504]
-  const retryDelays = [5000, 15000, 30000]
+  // Tighter retry delays: 3s, 8s, 15s (was 5s, 15s, 30s).
+  // Most 500 errors are transient (cinemm.com overloaded), and waiting
+  // 30s just wastes time. 3s is enough for most cases.
+  const retryDelays = [3000, 8000, 15000]
   let lastError = null
 
   for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
@@ -125,7 +132,7 @@ async function callAction(actionId, args) {
         method: 'POST',
         headers: { ...COMMON_HEADERS, 'Next-Action': actionId },
         body: JSON.stringify(args),
-        signal: AbortSignal.timeout(25000),
+        signal: AbortSignal.timeout(20000),
       })
     } catch (e) {
       lastError = e
@@ -206,7 +213,9 @@ async function submitToRailway(mediaId, mediaType, episodeId, streamUrls) {
 }
 
 async function submitToRailwayWithRetry(mediaId, mediaType, episodeId, streamUrls) {
-  const retryDelays = [10000, 20000, 30000]
+  // Tighter retry delays: 4s, 8s, 12s (was 10s, 20s, 30s).
+  // Railway cold-start 502s usually resolve in 4s; waiting 30s was overkill.
+  const retryDelays = [4000, 8000, 12000]
   let lastError = null
   for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
     try {
@@ -221,6 +230,31 @@ async function submitToRailwayWithRetry(mediaId, mediaType, episodeId, streamUrl
     }
   }
   throw lastError
+}
+
+// ---------- Railway warm-up (prevents first-request 502) ----------
+/**
+ * Railway free tier sleeps the service after ~5 min of inactivity.
+ * The first request after sleep returns 502 while the container spins up.
+ * This function sends a lightweight GET to wake the server before we
+ * start the real batch, saving us a 10-30s retry cycle on the first item.
+ */
+async function warmupRailway() {
+  const start = Date.now()
+  try {
+    const res = await fetch(`${RAILWAY_URL}/api/manual-link?mediaId=0&mediaType=movie`, {
+      signal: AbortSignal.timeout(30000),
+    })
+    const elapsed = ((Date.now() - start) / 1000).toFixed(1)
+    if (res.ok) {
+      console.log(`   ✅ Railway warm (${elapsed}s)`)
+    } else {
+      console.log(`   ⚠️  Railway warmup HTTP ${res.status} (${elapsed}s) — continuing anyway`)
+    }
+  } catch (e) {
+    const elapsed = ((Date.now() - start) / 1000).toFixed(1)
+    console.log(`   ⚠️  Railway warmup failed (${elapsed}s): ${e.message} — continuing anyway`)
+  }
 }
 
 // ---------- Progress file I/O ----------
@@ -499,7 +533,13 @@ async function main() {
     process.exit(0)
   }
 
-  console.log(`\n🚀 Processing ${queue.length} ${type}(s) this batch...\n`)
+  // Warm up Railway server (prevents 502 cold-start on first item)
+  console.log(`🔥 Warming up Railway server...`)
+  await warmupRailway()
+
+  console.log(`\n🚀 Processing ${queue.length} ${type}(s) this batch...`)
+  console.log(`   Concurrency: ${CONCURRENCY} (parallel ${type}s at a time)`)
+  console.log(`   Delay between cinemm.com calls: ${DELAY_MS}ms\n`)
 
   const stats = {
     success: 0,
@@ -509,40 +549,73 @@ async function main() {
     episodesProcessed: 0, // series only
   }
 
-  for (let i = 0; i < queue.length; i++) {
-    const id = queue[i]
-    console.log(`━━━ [${i + 1}/${queue.length}] ${type} ${id} ━━━`)
+  // ---------- Concurrent processing ----------
+  // Process CONCURRENCY items at a time. Each task:
+  //   1. Calls cinemm.com getMovieSources/getSeriesDetails
+  //   2. Calls Railway /api/manual-link to store URLs
+  //   3. Updates shared progress + stats
+  //
+  // The shared `progress` object is mutated only by the task itself (no
+  // overlap because each task works on a different ID), so no locking
+  // needed. saveProgress() uses atomic write so concurrent saves are safe
+  // (last write wins, but each task only adds its own ID).
+  let nextIndex = 0
+  let completedCount = 0
 
-    let result
-    try {
-      if (type === 'movie') {
-        result = await processMovie(id, progress)
-      } else {
-        result = await processSeries(id, progress)
-        if (result.episodes) stats.episodesProcessed += result.episodes
+  async function worker(workerId) {
+    while (true) {
+      const i = nextIndex++
+      if (i >= queue.length) return
+
+      const id = queue[i]
+      const tag = `[${i + 1}/${queue.length}]`
+      console.log(`━━━ ${tag} ${type} ${id} (worker ${workerId}) ━━━`)
+
+      let result
+      try {
+        if (type === 'movie') {
+          result = await processMovie(id, progress)
+        } else {
+          result = await processSeries(id, progress)
+          if (result.episodes) stats.episodesProcessed += result.episodes
+        }
+      } catch (e) {
+        progress.failedCount++
+        console.error(`  ❌ ERROR: ${e.message}`)
+        result = { stored: 0, status: 'error' }
       }
-    } catch (e) {
-      progress.failedCount++
-      console.error(`  ❌ ERROR: ${e.message}`)
-      result = { stored: 0, status: 'error' }
+
+      stats.stored += result.stored || 0
+      if (result.status === 'success') stats.success++
+      else if (result.status === 'no-servers' || result.status === 'no-urls' || result.status === 'no-seasons' || result.status === 'not-direct') stats.noUrls++
+      else stats.failed++
+
+      // Mark as processed (skip on next run) — only for permanent results
+      if (result.status === 'success' || result.status === 'no-servers' || result.status === 'no-urls' || result.status === 'no-seasons' || result.status === 'no-response' || result.status === 'not-direct') {
+        progress.processedIds[type].push(id)
+      } else {
+        console.log(`  🔁 Will retry on next batch (transient error)`)
+      }
+
+      completedCount++
+      // Save every 5 completed items (not every item — reduces disk I/O)
+      if (completedCount % 5 === 0 || completedCount === queue.length) {
+        saveProgress(progress)
+      }
+      // Brief delay before next item (lets cinemm.com breathe)
+      await sleep(DELAY_MS / CONCURRENCY)
     }
-
-    stats.stored += result.stored || 0
-    if (result.status === 'success') stats.success++
-    else if (result.status === 'no-servers' || result.status === 'no-urls' || result.status === 'no-seasons' || result.status === 'not-direct') stats.noUrls++
-    else stats.failed++
-
-    // Mark as processed (skip on next run) — only for permanent results
-    // For transient errors (HTTP 5xx, network), don't mark so we retry next time
-    if (result.status === 'success' || result.status === 'no-servers' || result.status === 'no-urls' || result.status === 'no-seasons' || result.status === 'no-response' || result.status === 'not-direct') {
-      progress.processedIds[type].push(id)
-    } else {
-      console.log(`  🔁 Will retry on next batch (transient error)`)
-    }
-
-    saveProgress(progress)
-    await sleep(DELAY_MS)
   }
+
+  // Launch CONCURRENCY workers in parallel
+  const workers = []
+  for (let w = 1; w <= CONCURRENCY; w++) {
+    workers.push(worker(w))
+  }
+  await Promise.all(workers)
+
+  // Final save (in case last batch wasn't a multiple of 5)
+  saveProgress(progress)
 
   // Summary
   console.log('\n═══════════════════════════════════════════════════════')

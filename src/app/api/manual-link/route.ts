@@ -48,7 +48,9 @@ async function ensureDb() {
  */
 
 const TTL_DAYS = 7
-const RATE_LIMIT_MS = 500 // 0.5s between shortlink resolves (polite to cinemm.com)
+// (RATE_LIMIT_MS removed — shortlinks are now processed in parallel, so
+// per-URL rate limiting is no longer needed. The Promise.all pattern
+// naturally paces the work.)
 
 interface SubmitResult {
   shortlink: string
@@ -175,161 +177,156 @@ export async function POST(req: NextRequest) {
   let stored = 0
   let failed = 0
 
-  for (const shortlink of shortlinks) {
-    // Validate URL format
-    let parsed: URL
-    try {
-      parsed = new URL(shortlink)
-    } catch {
-      results.push({
-        shortlink,
-        stored: false,
-        error: 'Invalid URL format',
-      })
-      failed++
-      continue
-    }
-
-    // Detect URL type:
-    //   - cinemm.com/p/...  → shortlink, needs 302 redirect resolution
-    //   - any other URL     → direct stream URL (e.g. from getMovieSourcesAction
-    //                         when called from Myanmar IP), skip resolution
-    const isCinemmShortlink =
-      parsed.hostname === 'cinemm.com' && parsed.pathname.startsWith('/p/')
-
-    let streamUrl: string
-    let storedShortlink: string // what we store in the `shortlink` column
-
-    if (isCinemmShortlink) {
-      // ---- Shortlink path: resolve via 302 redirect ----
-      storedShortlink = shortlink
+  // ---------- Parallel processing ----------
+  // Process all shortlinks in parallel (was sequential). For a movie with
+  // 6 stream URLs, this drops end-to-end time from ~60s (6 × 10s HEAD) to
+  // ~10s. Each shortlink's work is independent (resolve redirect + HEAD
+  // file size + DB upsert), so parallelization is safe.
+  const processed: SubmitResult[] = await Promise.all(
+    shortlinks.map(async (shortlink): Promise<SubmitResult> => {
+      // Validate URL format
+      let parsed: URL
       try {
-        const res = await fetch(shortlink, {
-          method: 'GET',
-          redirect: 'manual',
-          headers: {
-            'User-Agent':
-              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            Accept: 'text/html,application/xhtml+xml',
-            'Accept-Language': 'en-US,en;q=0.9',
-          },
-          signal: AbortSignal.timeout(15000),
-        })
-
-        if (res.status < 300 || res.status >= 400) {
-          results.push({
-            shortlink,
-            stored: false,
-            error: `Shortlink did not redirect (HTTP ${res.status})`,
-          })
-          failed++
-          continue
-        }
-
-        const location = res.headers.get('location')
-        if (!location) {
-          results.push({
-            shortlink,
-            stored: false,
-            error: 'Redirect status but no Location header',
-          })
-          failed++
-          continue
-        }
-        streamUrl = location
-      } catch (e) {
-        results.push({
-          shortlink,
-          stored: false,
-          error: e instanceof Error ? e.message : 'Failed to resolve shortlink',
-        })
-        failed++
-        continue
+        parsed = new URL(shortlink)
+      } catch {
+        return { shortlink, stored: false, error: 'Invalid URL format' }
       }
-    } else {
-      // ---- Direct stream URL path: skip resolution ----
-      // Used by the Termux crawler script (scripts/crawl-from-phone.mjs)
-      // which calls getMovieSourcesAction from a Myanmar IP and gets
-      // stream URLs directly.
-      streamUrl = shortlink
-      storedShortlink = shortlink // store the stream URL itself as the "shortlink"
-    }
 
-    // Parse metadata from streamUrl
-    const quality = parseQuality(streamUrl)
-    const format = parseFormat(streamUrl)
-    const host = parseHost(streamUrl)
-    const fileName = parseFileName(streamUrl)
+      // Detect URL type:
+      //   - cinemm.com/p/...  → shortlink, needs 302 redirect resolution
+      //   - any other URL     → direct stream URL (e.g. from getMovieSourcesAction
+      //                         when called from Myanmar IP), skip resolution
+      const isCinemmShortlink =
+        parsed.hostname === 'cinemm.com' && parsed.pathname.startsWith('/p/')
 
-    // Fetch file size via HEAD request (may fail for some hosts → "N/A")
-    const fileSize = await fetchFileSize(streamUrl)
+      let streamUrl: string
+      let storedShortlink: string // what we store in the `shortlink` column
 
-    // No expiry — store permanently (Bro wants URLs to persist forever).
-    // Previously this was 7-day TTL, but Bro requested permanent storage.
-    // We use year 9999 as "never expires" (SQLite handles this fine).
-    const expiresAt = new Date('9999-12-31T23:59:59.000Z')
+      if (isCinemmShortlink) {
+        // ---- Shortlink path: resolve via 302 redirect ----
+        storedShortlink = shortlink
+        try {
+          const res = await fetch(shortlink, {
+            method: 'GET',
+            redirect: 'manual',
+            headers: {
+              'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+              Accept: 'text/html,application/xhtml+xml',
+              'Accept-Language': 'en-US,en;q=0.9',
+            },
+            signal: AbortSignal.timeout(15000),
+          })
 
-    // Upsert into DB — if the same shortlink already exists for this media+episode,
-    // update it (refresh TTL + metadata); otherwise insert new.
-    try {
-      // Find existing by (mediaId, episodeId, shortlink) — note: SQLite doesn't support
-      // composite unique constraints easily, so we query first.
-      const existing = await db.manualStreamUrl.findFirst({
-        where: { mediaId, episodeId: epId, shortlink: storedShortlink },
-      })
-      if (existing) {
-        await db.manualStreamUrl.update({
-          where: { id: existing.id },
-          data: {
-            streamUrl,
-            quality,
-            format,
-            host,
-            fileName,
-            fileSize,
-            expiresAt,
-          },
-        })
+          if (res.status < 300 || res.status >= 400) {
+            return {
+              shortlink,
+              stored: false,
+              error: `Shortlink did not redirect (HTTP ${res.status})`,
+            }
+          }
+
+          const location = res.headers.get('location')
+          if (!location) {
+            return {
+              shortlink,
+              stored: false,
+              error: 'Redirect status but no Location header',
+            }
+          }
+          streamUrl = location
+        } catch (e) {
+          return {
+            shortlink,
+            stored: false,
+            error: e instanceof Error ? e.message : 'Failed to resolve shortlink',
+          }
+        }
       } else {
-        await db.manualStreamUrl.create({
-          data: {
-            mediaId,
-            mediaType,
-            episodeId: epId,
-            shortlink: storedShortlink,
-            streamUrl,
-            quality,
-            format,
-            host,
-            fileName,
-            fileSize,
-            expiresAt,
-          },
-        })
+        // ---- Direct stream URL path: skip resolution ----
+        // Used by the Termux crawler script (scripts/crawl-from-phone.mjs)
+        // which calls getMovieSourcesAction from a Myanmar IP and gets
+        // stream URLs directly.
+        streamUrl = shortlink
+        storedShortlink = shortlink // store the stream URL itself as the "shortlink"
       }
-      stored++
-      results.push({
-        shortlink: storedShortlink,
-        streamUrl,
-        quality,
-        format,
-        host,
-        fileName,
-        fileSize,
-        stored: true,
-      })
-    } catch (dbErr) {
-      results.push({
-        shortlink: storedShortlink,
-        streamUrl,
-        stored: false,
-        error: `DB write failed: ${dbErr instanceof Error ? dbErr.message : 'unknown'}`,
-      })
-      failed++
-    }
 
-    // Rate limit between requests
-    await new Promise((r) => setTimeout(r, RATE_LIMIT_MS))
+      // Parse metadata from streamUrl
+      const quality = parseQuality(streamUrl)
+      const format = parseFormat(streamUrl)
+      const host = parseHost(streamUrl)
+      const fileName = parseFileName(streamUrl)
+
+      // Fetch file size via HEAD request (in parallel with other URLs)
+      const fileSize = await fetchFileSize(streamUrl)
+
+      // No expiry — store permanently (Bro wants URLs to persist forever).
+      // We use year 9999 as "never expires" (SQLite handles this fine).
+      const expiresAt = new Date('9999-12-31T23:59:59.000Z')
+
+      // Upsert into DB — if the same shortlink already exists for this media+episode,
+      // update it (refresh TTL + metadata); otherwise insert new.
+      try {
+        // Find existing by (mediaId, episodeId, shortlink)
+        const existing = await db.manualStreamUrl.findFirst({
+          where: { mediaId, episodeId: epId, shortlink: storedShortlink },
+        })
+        if (existing) {
+          await db.manualStreamUrl.update({
+            where: { id: existing.id },
+            data: {
+              streamUrl,
+              quality,
+              format,
+              host,
+              fileName,
+              fileSize,
+              expiresAt,
+            },
+          })
+        } else {
+          await db.manualStreamUrl.create({
+            data: {
+              mediaId,
+              mediaType,
+              episodeId: epId,
+              shortlink: storedShortlink,
+              streamUrl,
+              quality,
+              format,
+              host,
+              fileName,
+              fileSize,
+              expiresAt,
+            },
+          })
+        }
+        return {
+          shortlink: storedShortlink,
+          streamUrl,
+          quality,
+          format,
+          host,
+          fileName,
+          fileSize,
+          stored: true,
+        }
+      } catch (dbErr) {
+        return {
+          shortlink: storedShortlink,
+          streamUrl,
+          stored: false,
+          error: `DB write failed: ${dbErr instanceof Error ? dbErr.message : 'unknown'}`,
+        }
+      }
+    }),
+  )
+
+  // Aggregate results (preserve order matching input shortlinks array)
+  for (const r of processed) {
+    results.push(r)
+    if (r.stored) stored++
+    else failed++
   }
 
   return NextResponse.json({
