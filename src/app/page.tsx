@@ -510,6 +510,9 @@ export default function Home() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [cachedSearch, setCachedSearch] = useState(false)
+  // Map of mediaId → { hasUrls, count } — populated after each search to
+  // show "URLs Ready" / "No URLs" badges on result cards.
+  const [urlStatuses, setUrlStatuses] = useState<Record<string, { hasUrls: boolean; count: number }>>({})
 
   // Detail dialog state
   const [selected, setSelected] = useState<SearchItem | null>(null)
@@ -763,6 +766,7 @@ export default function Home() {
           if (res.ok && Array.isArray(data.items)) {
             setResults(data.items)
             setCachedSearch(!!data.cached)
+            fetchUrlStatuses(data.items, t)
           }
         } catch {
           // Background fetch failed — prev/next just won't show, that's OK
@@ -943,6 +947,9 @@ export default function Home() {
           toast.info('No results found. Try a different search term.')
         } else {
           toast.success(`Found ${data.items.length} ${data.cached ? 'cached ' : ''}result${data.items.length === 1 ? '' : 's'}`)
+          // Fetch URL availability status for all results in a single batch
+          // (1 HTTP call instead of N — critical for Vercel free tier)
+          fetchUrlStatuses(data.items, mediaType)
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Search failed')
@@ -953,6 +960,25 @@ export default function Home() {
     },
     [query, mediaType],
   )
+
+  // Fetch URL availability status for a list of search results.
+  // Single batch HTTP call to /api/manual-link-status — much faster than
+  // calling /api/manual-link per item. Statuses are stored in urlStatuses
+  // state and used by ResultCard to show a "URLs Ready" / "No URLs" badge.
+  const fetchUrlStatuses = useCallback(async (items: SearchItem[], type: string) => {
+    if (items.length === 0) return
+    const mediaIds = items.map((it) => String(it.id)).join(',')
+    try {
+      const res = await fetch(`/api/manual-link-status?mediaIds=${encodeURIComponent(mediaIds)}&mediaType=${type}`)
+      if (!res.ok) return
+      const data = await res.json()
+      if (data.statuses) {
+        setUrlStatuses((prev) => ({ ...prev, ...data.statuses }))
+      }
+    } catch {
+      // Silent failure — badges just won't show
+    }
+  }, [])
 
   const openDetails = useCallback(async (item: SearchItem) => {
     setSelected(item)
@@ -1830,10 +1856,13 @@ export default function Home() {
               </div>
             </div>
             <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 gap-2.5 sm:gap-3 md:gap-4">
-              {results.map((item) => (
+              {results.map((item) => {
+                const status = urlStatuses[String(item.id)]
+                return (
                 <ResultCard
                   key={`${item.type}-${item.id}`}
                   item={item}
+                  urlStatus={status}
                   onClick={() => openDetails(item)}
                   selected={selectedIds.has(item.id)}
                   onToggleSelect={() => {
@@ -1845,7 +1874,8 @@ export default function Home() {
                     })
                   }}
                 />
-              ))}
+                )
+              })}
             </div>
           </>
         )}
@@ -2059,11 +2089,13 @@ export default function Home() {
 
 function ResultCard({
   item,
+  urlStatus,
   onClick,
   selected = false,
   onToggleSelect,
 }: {
   item: SearchItem
+  urlStatus?: { hasUrls: boolean; count: number }
   onClick: () => void
   selected?: boolean
   onToggleSelect?: () => void
@@ -2114,6 +2146,25 @@ function ResultCard({
               <span className="hidden sm:inline">{item.type}</span>
             </Badge>
           </div>
+          {/* URL availability badge — bottom-left of poster.
+              Shows whether stream URLs are stored for this movie/series.
+              Only renders if urlStatus is loaded (after batch fetch). */}
+          {urlStatus && (
+            <div className="absolute bottom-1 left-1 sm:bottom-2 sm:left-2 z-10">
+              {urlStatus.hasUrls ? (
+                <Badge className="bg-emerald-600/95 hover:bg-emerald-600 text-white border-0 backdrop-blur-sm text-[9px] sm:text-[10px] px-1 py-0 sm:px-1.5 sm:py-0.5 gap-0.5">
+                  <Check className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
+                  <span className="font-semibold">{urlStatus.count}</span>
+                  <span className="hidden sm:inline">URLs</span>
+                </Badge>
+              ) : (
+                <Badge className="bg-zinc-700/95 hover:bg-zinc-700 text-zinc-300 border-0 backdrop-blur-sm text-[9px] sm:text-[10px] px-1 py-0 sm:px-1.5 sm:py-0.5">
+                  <span className="hidden sm:inline">No URLs</span>
+                  <span className="sm:hidden">—</span>
+                </Badge>
+              )}
+            </div>
+          )}
         </div>
         <div className="p-2 sm:p-3">
           <h3 className="font-medium text-xs sm:text-sm leading-tight line-clamp-2 text-zinc-100">{item.name}</h3>
