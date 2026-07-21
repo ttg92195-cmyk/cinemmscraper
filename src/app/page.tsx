@@ -965,8 +965,29 @@ export default function Home() {
   // Single batch HTTP call to /api/manual-link-status — much faster than
   // calling /api/manual-link per item. Statuses are stored in urlStatuses
   // state and used by ResultCard to show a "URLs Ready" / "No URLs" badge.
+  //
+  // PERFORMANCE OPTIMIZATION:
+  // - Marks all items as 'loading' first (skeleton badge shows immediately)
+  // - Then fetches statuses in the background
+  // - Existing statuses (from previous searches) are preserved
   const fetchUrlStatuses = useCallback(async (items: SearchItem[], type: string) => {
     if (items.length === 0) return
+
+    // Mark all items as 'loading' so skeleton badges show immediately.
+    // Only mark items we don't already have status for (preserve cache).
+    setUrlStatuses((prev) => {
+      const next = { ...prev }
+      for (const it of items) {
+        const id = String(it.id)
+        if (!next[id]) {
+          // Use a sentinel value to indicate 'loading' state.
+          // ResultCard treats { hasUrls: false, count: -1 } as 'loading'.
+          next[id] = { hasUrls: false, count: -1 }
+        }
+      }
+      return next
+    })
+
     const mediaIds = items.map((it) => String(it.id)).join(',')
     try {
       const res = await fetch(`/api/manual-link-status?mediaIds=${encodeURIComponent(mediaIds)}&mediaType=${type}`)
@@ -976,7 +997,18 @@ export default function Home() {
         setUrlStatuses((prev) => ({ ...prev, ...data.statuses }))
       }
     } catch {
-      // Silent failure — badges just won't show
+      // Silent failure — badges just won't show.
+      // Clear 'loading' markers so they don't stay as skeletons forever.
+      setUrlStatuses((prev) => {
+        const next = { ...prev }
+        for (const it of items) {
+          const id = String(it.id)
+          if (next[id]?.count === -1) {
+            delete next[id]
+          }
+        }
+        return next
+      })
     }
   }, [])
 
@@ -2148,10 +2180,20 @@ function ResultCard({
           </div>
           {/* URL availability badge — bottom-left of poster.
               Shows whether stream URLs are stored for this movie/series.
-              Only renders if urlStatus is loaded (after batch fetch). */}
+              Three states:
+              - undefined: status not yet requested (don't render)
+              - { hasUrls: false, count: -1 }: loading (gray pulsing skeleton)
+              - { hasUrls: true, count: N }: green badge with count
+              - { hasUrls: false, count: 0 }: gray "No URLs" badge */}
           {urlStatus && (
             <div className="absolute bottom-1 left-1 sm:bottom-2 sm:left-2 z-10">
-              {urlStatus.hasUrls ? (
+              {urlStatus.count === -1 ? (
+                // Loading skeleton — pulsing gray badge
+                <Badge className="bg-zinc-700/80 text-zinc-400 border-0 backdrop-blur-sm text-[9px] sm:text-[10px] px-1 py-0 sm:px-1.5 sm:py-0.5 animate-pulse">
+                  <span className="hidden sm:inline">Loading…</span>
+                  <span className="sm:hidden">···</span>
+                </Badge>
+              ) : urlStatus.hasUrls ? (
                 <Badge className="bg-emerald-600/95 hover:bg-emerald-600 text-white border-0 backdrop-blur-sm text-[9px] sm:text-[10px] px-1 py-0 sm:px-1.5 sm:py-0.5 gap-0.5">
                   <Check className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
                   <span className="font-semibold">{urlStatus.count}</span>
