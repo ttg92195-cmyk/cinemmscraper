@@ -121,9 +121,15 @@ async function main() {
   }
 
   const { Client } = pg
+  // IMPORTANT: Supabase free tier limits session-mode pool to 15 connections.
+  // We use a SINGLE client for all operations (read existing URLs + insert new ones)
+  // to stay under the limit. HEAD requests go to CDN hosts (not Postgres), so they
+  // don't count toward the connection pool — only the DB queries do.
   const client = new Client({
     connectionString: dbUrl,
-    connectionTimeoutMillis: 15000,
+    connectionTimeoutMillis: 30000,
+    // Lower statement_timeout so a slow query doesn't hang the whole script
+    statement_timeout: 60000,
   })
 
   console.log('═══════════════════════════════════════════════════════')
@@ -239,48 +245,73 @@ async function main() {
     let insertFailed = 0
     const farFuture = '9999-12-31T23:59:59.000Z'
 
-    for (const mirror of workingMirrors) {
+    // BATCH INSERT: insert 200 rows per query (instead of 1 row per query).
+    // This is 200x faster and uses only ONE connection (no pool exhaustion).
+    // For 38,000 rows: 190 queries instead of 38,000 queries.
+    const BATCH_SIZE = 200
+    for (let batchStart = 0; batchStart < workingMirrors.length; batchStart += BATCH_SIZE) {
+      const batch = workingMirrors.slice(batchStart, batchStart + BATCH_SIZE)
       try {
-        // Format file size from content length
-        let fileSize = 'N/A'
-        if (mirror.contentLength) {
-          const bytes = mirror.contentLength
-          if (bytes < 1024) fileSize = `${bytes} B`
-          else if (bytes < 1024 * 1024) fileSize = `${(bytes / 1024).toFixed(1)} KB`
-          else if (bytes < 1024 * 1024 * 1024) fileSize = `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-          else fileSize = `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+        // Build multi-row INSERT with parameterized values
+        // Values: ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), $12), ($13, ...), ...
+        const valuePlaceholders = []
+        const params = []
+        let paramIdx = 1
+        for (const mirror of batch) {
+          // Format file size from content length
+          let fileSize = 'N/A'
+          if (mirror.contentLength) {
+            const bytes = mirror.contentLength
+            if (bytes < 1024) fileSize = `${bytes} B`
+            else if (bytes < 1024 * 1024) fileSize = `${(bytes / 1024).toFixed(1)} KB`
+            else if (bytes < 1024 * 1024 * 1024) fileSize = `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+            else fileSize = `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+          }
+
+          valuePlaceholders.push(
+            `(gen_random_uuid()::text, $${paramIdx}, $${paramIdx + 1}, $${paramIdx + 2}, $${paramIdx + 3}, $${paramIdx + 4}, $${paramIdx + 5}, $${paramIdx + 6}, $${paramIdx + 7}, $${paramIdx + 8}, $${paramIdx + 9}, NOW(), $${paramIdx + 10})`
+          )
+          params.push(
+            mirror.originalRow.mediaId,
+            mirror.originalRow.mediaType,
+            mirror.originalRow.episodeId,
+            mirror.mirrorUrl, // store mirror URL as the shortlink too
+            mirror.mirrorUrl,
+            mirror.originalRow.quality,
+            mirror.originalRow.format,
+            mirror.mirrorHost,
+            mirror.originalRow.fileName,
+            fileSize,
+            farFuture,
+          )
+          paramIdx += 11
         }
 
-        await client.query(`
+        const sql = `
           INSERT INTO "ManualStreamUrl" (
             "id", "mediaId", "mediaType", "episodeId", "shortlink", "streamUrl",
             "quality", "format", "host", "fileName", "fileSize", "createdAt", "expiresAt"
-          ) VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), $11)
+          ) VALUES ${valuePlaceholders.join(', ')}
           ON CONFLICT DO NOTHING
-        `, [
-          mirror.originalRow.mediaId,
-          mirror.originalRow.mediaType,
-          mirror.originalRow.episodeId,
-          mirror.mirrorUrl, // store mirror URL as the shortlink too
-          mirror.mirrorUrl,
-          mirror.originalRow.quality,
-          mirror.originalRow.format,
-          mirror.mirrorHost,
-          mirror.originalRow.fileName,
-          fileSize,
-          farFuture,
-        ])
-        inserted++
-      } catch (e) {
-        insertFailed++
-        if (insertFailed <= 5) {
-          console.error(`   ❌ Insert failed for ${mirror.mirrorUrl}: ${e.message}`)
+        `
+        const result = await client.query(sql, params)
+        inserted += result.rowCount || 0
+
+        // Progress every 5 batches (1000 rows)
+        if (Math.floor(batchStart / BATCH_SIZE) % 5 === 0) {
+          console.log(`   📊 Insert progress: ${inserted.toLocaleString()}/${workingMirrors.length.toLocaleString()}`)
         }
+      } catch (e) {
+        insertFailed += batch.length
+        if (insertFailed <= 5) {
+          console.error(`   ❌ Batch insert failed at ${batchStart}: ${e.message}`)
+        }
+        // Continue with next batch — partial progress is better than abort
       }
     }
 
-    console.log(`   ✅ Inserted: ${inserted}`)
-    console.log(`   ❌ Insert failed: ${insertFailed}\n`)
+    console.log(`\n   ✅ Inserted: ${inserted.toLocaleString()}`)
+    console.log(`   ❌ Insert failed: ${insertFailed.toLocaleString()}\n`)
   }
 
   // Final summary
