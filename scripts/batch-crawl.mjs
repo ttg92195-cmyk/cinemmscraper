@@ -346,14 +346,47 @@ function saveProgress(p) {
 }
 
 // ---------- Processors ----------
+// Number of times to retry when access is undefined/null/missing
+// (these are typically transient VPN drops — a 5s wait + retry often
+// recovers the connection and gets us the URLs).
+const UNDEFINED_RETRY_COUNT = 3
+const UNDEFINED_RETRY_DELAY_MS = 5000
+
 async function processMovie(id, progress) {
-  const sources = await getMovieSources(id)
+  let sources = null
+  let lastStatus = 'no-response'
+
+  // Retry loop: if access is undefined/null/missing, the VPN likely
+  // dropped momentarily. Wait and retry — often the connection recovers
+  // and we get the URLs on the 2nd or 3rd try.
+  for (let attempt = 1; attempt <= UNDEFINED_RETRY_COUNT; attempt++) {
+    sources = await getMovieSources(id)
+    if (!sources) {
+      console.log(`  ⚠️  No response (attempt ${attempt}/${UNDEFINED_RETRY_COUNT})`)
+      lastStatus = 'no-response'
+      if (attempt < UNDEFINED_RETRY_COUNT) {
+        await sleep(UNDEFINED_RETRY_DELAY_MS)
+        continue
+      }
+      return { stored: 0, status: 'no-response' }
+    }
+    // Valid response — break out of retry loop
+    if (sources.access === 'direct' || sources.access === 'telegram') {
+      break
+    }
+    // access is undefined/null/missing — likely VPN drop. Retry.
+    console.log(`  ⚠️  access="${sources.access}" (attempt ${attempt}/${UNDEFINED_RETRY_COUNT}, retrying in ${UNDEFINED_RETRY_DELAY_MS / 1000}s...)`)
+    lastStatus = 'not-direct'
+    if (attempt < UNDEFINED_RETRY_COUNT) {
+      await sleep(UNDEFINED_RETRY_DELAY_MS)
+    }
+  }
+
   if (!sources) {
-    console.log(`  ⚠️  No response`)
-    return { stored: 0, status: 'no-response' }
+    return { stored: 0, status: lastStatus }
   }
   if (sources.access !== 'direct') {
-    console.log(`  ⚠️  access="${sources.access}" (VPN IP not Myanmar?)`)
+    console.log(`  ⚠️  access="${sources.access}" (VPN IP not Myanmar after ${UNDEFINED_RETRY_COUNT} retries)`)
     return { stored: 0, status: 'not-direct' }
   }
   const servers = sources.servers || []
@@ -449,13 +482,33 @@ async function processSeries(id, progress) {
       if (!ep.id) continue
       const epNum = ep.episode_number ?? ep.episodeNumber ?? 1
       totalEpisodes++
-      try {
-        const sources = await getEpisodeSources(ep.id, epNum)
-        if (!sources || sources.access !== 'direct') {
-          console.log(`    ⏭️  S${seasonNum}E${epNum}: access="${sources?.access || 'null'}"`)
-          await sleep(DELAY_MS)
-          continue
+
+      // Retry loop for undefined access (VPN drops)
+      let sources = null
+      let epSuccess = false
+      for (let attempt = 1; attempt <= UNDEFINED_RETRY_COUNT; attempt++) {
+        try {
+          sources = await getEpisodeSources(ep.id, epNum)
+        } catch (e) {
+          console.log(`    ❌ S${seasonNum}E${epNum} fetch error (attempt ${attempt}): ${e.message}`)
+          sources = null
         }
+        if (sources && (sources.access === 'direct' || sources.access === 'telegram')) {
+          epSuccess = true
+          break
+        }
+        if (attempt < UNDEFINED_RETRY_COUNT) {
+          console.log(`    ⚠️  S${seasonNum}E${epNum}: access="${sources?.access || 'null'}" (attempt ${attempt}/${UNDEFINED_RETRY_COUNT}, retrying...)`)
+          await sleep(UNDEFINED_RETRY_DELAY_MS)
+        }
+      }
+
+      if (!epSuccess || !sources || sources.access !== 'direct') {
+        console.log(`    ⏭️  S${seasonNum}E${epNum}: access="${sources?.access || 'null'}" (skipped after ${UNDEFINED_RETRY_COUNT} retries)`)
+        await sleep(DELAY_MS)
+        continue
+      }
+      try {
         const servers = sources.servers || []
         const urls = servers
           .map((s) => s.playUrl || s.url)
