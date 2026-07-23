@@ -121,17 +121,19 @@ async function main() {
   }
 
   const { Client } = pg
-  // IMPORTANT: Supabase free tier limits session-mode pool to 15 connections.
-  // We use a SINGLE client for all operations (read existing URLs + insert new ones)
-  // to stay under the limit. HEAD requests go to CDN hosts (not Postgres), so they
-  // don't count toward the connection pool — only the DB queries do.
+  // Use transaction pooler (port 6543) to avoid session pool exhaustion.
   let connStr = dbUrl
   if (connStr.includes(':5432/')) connStr = connStr.replace(':5432/', ':6543/')
   const client = new Client({
     connectionString: connStr,
     connectionTimeoutMillis: 30000,
-    // Lower statement_timeout so a slow query doesn't hang the whole script
     statement_timeout: 60000,
+    idle_in_transaction_session_timeout: 60000,
+  })
+
+  // Handle unexpected connection termination gracefully
+  client.on('error', (err) => {
+    console.error('⚠️  Postgres client error:', err.message)
   })
 
   console.log('═══════════════════════════════════════════════════════')
