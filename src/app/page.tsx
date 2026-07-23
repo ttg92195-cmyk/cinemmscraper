@@ -2210,14 +2210,15 @@ function ResultCard({
               Shows whether stream URLs are stored for this movie/series.
               Three states:
               - undefined: status not yet requested (don't render)
-              - { hasUrls: false, count: -1 }: loading (gray pulsing skeleton)
+              - { hasUrls: false, count: -1 }: loading (static gray badge, no animation)
               - { hasUrls: true, count: N }: green badge with count
-              - { hasUrls: false, count: 0 }: gray "No URLs" badge */}
+              - { hasUrls: false, count: 0 }: gray "No URLs" badge
+              NOTE: animate-pulse removed — caused scroll lag with 60 cards. */}
           {urlStatus && (
             <div className="absolute bottom-1 left-1 sm:bottom-2 sm:left-2 z-10">
               {urlStatus.count === -1 ? (
-                // Loading skeleton — pulsing gray badge
-                <Badge className="bg-zinc-700/80 text-zinc-400 border-0 backdrop-blur-sm text-[9px] sm:text-[10px] px-1 py-0 sm:px-1.5 sm:py-0.5 animate-pulse">
+                // Loading badge — static (no pulse animation, prevents scroll lag)
+                <Badge className="bg-zinc-700/80 text-zinc-400 border-0 backdrop-blur-sm text-[9px] sm:text-[10px] px-1 py-0 sm:px-1.5 sm:py-0.5">
                   <span className="hidden sm:inline">Loading…</span>
                   <span className="sm:hidden">···</span>
                 </Badge>
