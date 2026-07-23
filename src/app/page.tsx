@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
-import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight, ArrowLeft, KeyRound, Settings, Plus, Zap, ChevronLeft, Send, Upload, Trash2, RefreshCw, CheckSquare, Square } from 'lucide-react'
+import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight, ArrowLeft, KeyRound, Settings, Plus, Zap, ChevronLeft, Send, Upload, Trash2, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -1855,42 +1855,14 @@ export default function Home() {
                   <span className="ml-2 text-purple-400">({selectedIds.size} selected)</span>
                 )}
               </div>
-              <div className="flex gap-2 flex-wrap">
-                {/* Select All / Deselect All — toggles between states */}
-                {selectedIds.size === results.length ? (
-                  // All selected → show "Deselect All"
+              <div className="flex gap-2">
+                {selectedIds.size > 0 && (
                   <Button
                     size="sm"
                     onClick={() => setSelectedIds(new Set())}
                     className="bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs"
                   >
-                    <Square className="w-3 h-3 mr-1" />
-                    Deselect All
-                  </Button>
-                ) : (
-                  // Not all selected → show "Select All"
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      const all = new Set<number>()
-                      results.forEach((r) => all.add(r.id))
-                      setSelectedIds(all)
-                    }}
-                    className="bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs"
-                  >
-                    <CheckSquare className="w-3 h-3 mr-1" />
-                    Select All ({results.length})
-                  </Button>
-                )}
-                {selectedIds.size > 0 && selectedIds.size !== results.length && (
-                  // Partial selection → show Clear too
-                  <Button
-                    size="sm"
-                    onClick={() => setSelectedIds(new Set())}
-                    className="bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs"
-                  >
-                    <X className="w-3 h-3 mr-1" />
-                    Clear
+                    Clear selection
                   </Button>
                 )}
                 {selectedIds.size > 0 && (
@@ -2210,15 +2182,14 @@ function ResultCard({
               Shows whether stream URLs are stored for this movie/series.
               Three states:
               - undefined: status not yet requested (don't render)
-              - { hasUrls: false, count: -1 }: loading (static gray badge, no animation)
+              - { hasUrls: false, count: -1 }: loading (gray pulsing skeleton)
               - { hasUrls: true, count: N }: green badge with count
-              - { hasUrls: false, count: 0 }: gray "No URLs" badge
-              NOTE: animate-pulse removed — caused scroll lag with 60 cards. */}
+              - { hasUrls: false, count: 0 }: gray "No URLs" badge */}
           {urlStatus && (
             <div className="absolute bottom-1 left-1 sm:bottom-2 sm:left-2 z-10">
               {urlStatus.count === -1 ? (
-                // Loading badge — static (no pulse animation, prevents scroll lag)
-                <Badge className="bg-zinc-700/80 text-zinc-400 border-0 backdrop-blur-sm text-[9px] sm:text-[10px] px-1 py-0 sm:px-1.5 sm:py-0.5">
+                // Loading skeleton — pulsing gray badge
+                <Badge className="bg-zinc-700/80 text-zinc-400 border-0 backdrop-blur-sm text-[9px] sm:text-[10px] px-1 py-0 sm:px-1.5 sm:py-0.5 animate-pulse">
                   <span className="hidden sm:inline">Loading…</span>
                   <span className="sm:hidden">···</span>
                 </Badge>
@@ -3073,9 +3044,14 @@ function TelegramStreamLinks({ urls, cached }: { urls: string[]; cached: boolean
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
 
   // Parse quality + format from URL — e.g. ...Inception.2010.UHD.BluRay.2160p.4K...mkv
+  // IMPORTANT: Check resolution-specific patterns (2160p, 1080p, 720p, 480p)
+  // BEFORE 4K/8K, because "4K" can appear in path segments and cause false
+  // matches for 1080p/720p files.
   function parseQuality(url: string): string {
-    const m = url.match(/(8K|4K|2160p|1080p|720p|480p)/i)
-    return m ? m[1].toUpperCase() : 'SD'
+    const m = url.match(/(2160p|1080p|720p|480p|8K|4K)/i)
+    const result = m ? m[1].toUpperCase() : 'SD'
+    if (result === '2160P') return '4K'
+    return result
   }
   function parseFormat(url: string): string {
     const m = url.match(/\.(mkv|mp4|avi|mov|webm)(?:\?|$)/i)
@@ -3290,8 +3266,10 @@ function ShortlinkResolver() {
   }
 
   function parseQuality(url: string): string {
-    const m = url.match(/(8K|4K|2160p|1080p|720p|480p)/i)
-    return m ? m[1].toUpperCase() : 'SD'
+    const m = url.match(/(2160p|1080p|720p|480p|8K|4K)/i)
+    const result = m ? m[1].toUpperCase() : 'SD'
+    if (result === '2160P') return '4K'
+    return result
   }
   function parseFormat(url: string): string {
     const m = url.match(/\.(mkv|mp4|avi|mov|webm)(?:\?|$)/i)

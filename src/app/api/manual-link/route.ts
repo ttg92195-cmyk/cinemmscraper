@@ -65,8 +65,24 @@ interface SubmitResult {
 }
 
 function parseQuality(url: string): string {
-  const m = url.match(/(8K|4K|2160p|1080p|720p|480p)/i)
-  return m ? m[1].toUpperCase() : 'SD'
+  // Match quality patterns in order of specificity (most specific first).
+  // IMPORTANT: Check 1080p/720p/480p/2160p BEFORE 4K, because "4K" can
+  // appear inside other quality strings (e.g. "2160p 4K UHD" — we want
+  // 2160p, but if 4K is matched first, we'd return 4K which is correct
+  // for that file but WRONG for "1080p SDR" files that don't contain 4K).
+  //
+  // The real bug: regex /(8K|4K|2160p|1080p|720p|480p)/i matches the
+  // FIRST occurrence in the URL. If a URL contains "4K" anywhere (even
+  // in a path segment like "/4k-movies/"), it returns "4K" for ALL
+  // files in that path — including 1080p and 720p files.
+  //
+  // Fix: check resolution-specific patterns first (2160p, 1080p, 720p,
+  // 480p), then fall back to 4K/8K (which are less specific).
+  const m = url.match(/(2160p|1080p|720p|480p|8K|4K)/i)
+  const result = m ? m[1].toUpperCase() : 'SD'
+  // Normalize: 2160P → 4K (they're the same resolution, 4K is more common label)
+  if (result === '2160P') return '4K'
+  return result
 }
 
 function parseFormat(url: string): string {
