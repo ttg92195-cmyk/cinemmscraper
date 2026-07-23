@@ -1,15 +1,18 @@
 /**
  * Sort stream URL entries by host preference + quality preference.
  *
- * Bro's requirement (2026-07-19, refined):
+ * Bro's requirement (2026-07-23, refined):
  *   Sort by TWO levels:
  *
  *   1. Host priority (PRIMARY sort):
- *        1. stream.cmreel.com         (best — fastest, most reliable)
- *        2. stream.bioscopeapp.com
- *        3. cmappfirst*.cmdrive.xyz
- *        4. cmappsecond*.cmdrive.xyz
- *        5. everything else (alphabetical, last)
+ *        1. md2.streammedia2.com         (Bro's preferred — fastest mirror)
+ *        2. media.bioscopeapplication.com
+ *        3. stream.cmreel.com            (cinemm.com's primary host)
+ *        4. stream.bioscopeapp.com       (cinemm.com's secondary host)
+ *        5. cmappfirst*.cmdrive.xyz      (cmdrive hosts — slower)
+ *        6. cmappsecond*.cmdrive.xyz
+ *        7. cmapp.*.cmdrive.xyz          (any other cmdrive)
+ *        8. everything else (alphabetical, last)
  *
  *   2. Quality priority (SECONDARY sort, within same host):
  *        1. 4K / 2160P                (highest quality)
@@ -18,15 +21,19 @@
  *        4. 480P
  *        5. STD / unknown             (last)
  *
- * Example result for a movie with 6 stream URLs:
- *   1. 1080P | stream.cmreel.com
- *   2. 720P  | stream.cmreel.com
- *   3. 1080P | stream.bioscopeapp.com
- *   4. 720P  | stream.bioscopeapp.com
- *   5. 1080P | cmappfirst1.cmdrive.xyz
- *   6. 720P  | cmappfirst1.cmdrive.xyz
- *
- *   (If 4K versions exist, they appear first within each host group.)
+ * Example result for a movie with 4K + 1080P + 720P × 4 hosts:
+ *   1. 4K    | md2.streammedia2.com
+ *   2. 1080P | md2.streammedia2.com
+ *   3. 720P  | md2.streammedia2.com
+ *   4. 4K    | media.bioscopeapplication.com
+ *   5. 1080P | media.bioscopeapplication.com
+ *   6. 720P  | media.bioscopeapplication.com
+ *   7. 4K    | stream.cmreel.com
+ *   8. 1080P | stream.cmreel.com
+ *   9. 720P  | stream.cmreel.com
+ *  10. 4K    | stream.bioscopeapp.com
+ *  11. 1080P | stream.bioscopeapp.com
+ *  12. 720P  | stream.bioscopeapp.com
  *
  * Used by:
  *   - src/app/api/manual-link/route.ts (GET handler)
@@ -41,15 +48,20 @@ interface StreamUrlEntry {
 }
 
 // ---------------------------------------------------------------------------
-// Host priority
+// Host priority — Bro's preferred order (mirror hosts first)
 // ---------------------------------------------------------------------------
 
 const HOST_PRIORITY: Array<{ pattern: RegExp; rank: number }> = [
-  { pattern: /^stream\.cmreel\.com$/i, rank: 1 },
-  { pattern: /^stream\.bioscopeapp\.com$/i, rank: 2 },
-  { pattern: /^cmappfirst\d*\.cmdrive\.xyz$/i, rank: 3 },
-  { pattern: /^cmappsecond\d*\.cmdrive\.xyz$/i, rank: 4 },
-  { pattern: /^cmapp.*\.cmdrive\.xyz$/i, rank: 5 },
+  // Mirror hosts (Bro's discovery — preferred)
+  { pattern: /^md2\.streammedia2\.com$/i, rank: 1 },
+  { pattern: /^media\.bioscopeapplication\.com$/i, rank: 2 },
+  // cinemm.com's original hosts
+  { pattern: /^stream\.cmreel\.com$/i, rank: 3 },
+  { pattern: /^stream\.bioscopeapp\.com$/i, rank: 4 },
+  // cmdrive hosts (slower)
+  { pattern: /^cmappfirst\d*\.cmdrive\.xyz$/i, rank: 5 },
+  { pattern: /^cmappsecond\d*\.cmdrive\.xyz$/i, rank: 6 },
+  { pattern: /^cmapp.*\.cmdrive\.xyz$/i, rank: 7 },
 ]
 
 function getHostRank(host: string): number {
@@ -113,7 +125,7 @@ export function sortStreamUrlsByHostPreference<T extends StreamUrlEntry>(
   entries: T[],
 ): T[] {
   return [...entries].sort((a, b) => {
-    // Primary: host rank (cmreel first, cmdrive last)
+    // Primary: host rank (mirror hosts first, cmdrive last)
     const hostRankA = getHostRank(a.host)
     const hostRankB = getHostRank(b.host)
     if (hostRankA !== hostRankB) return hostRankA - hostRankB
