@@ -38,7 +38,7 @@ if (!dbUrl) {
  * 2160p, 1080p, 720p, 480p are checked before 4K/8K to avoid false
  * matches when "4K" appears in URL path segments.
  */
-function parseQuality(url: string): string {
+function parseQuality(url) {
   const m = url.match(/(2160p|1080p|720p|480p|8K|4K)/i)
   const result = m ? m[1].toUpperCase() : 'SD'
   if (result === '2160P') return '4K'
