@@ -155,10 +155,31 @@ async function main() {
 
   console.log(`   Found ${result.rows.length} existing URLs\n`)
 
-  // Step 2: For each URL, extract path after /file/ and generate mirror URLs
-  const mirrorCandidates = [] // { originalRow, mirrorHost, mirrorUrl }
-
+  // Step 1b: Deduplicate original rows by streamUrl.
+  // If the same URL was stored multiple times (different IDs), we only
+  // need to generate mirrors from ONE copy. This prevents duplicate
+  // mirror candidates.
+  const seenUrls = new Set()
+  const uniqueRows = []
+  let duplicateOriginals = 0
   for (const row of result.rows) {
+    if (seenUrls.has(row.streamUrl)) {
+      duplicateOriginals++
+      continue
+    }
+    seenUrls.add(row.streamUrl)
+    uniqueRows.push(row)
+  }
+  if (duplicateOriginals > 0) {
+    console.log(`   ⚠️  Found ${duplicateOriginals} duplicate original URLs (deduped before mirror generation)`)
+    console.log(`   💡 Run scripts/dedup-urls.mjs to clean up duplicates in database\n`)
+  }
+
+  // Step 2: For each UNIQUE URL, extract path after /file/ and generate mirror URLs
+  const mirrorCandidates = [] // { originalRow, mirrorHost, mirrorUrl }
+  const seenMirrorUrls = new Set() // dedup mirror candidates by URL
+
+  for (const row of uniqueRows) {
     const url = row.streamUrl
     // Only process URLs from source hosts that have /file/ path
     const isSourceHost = SOURCE_HOSTS.some((h) => url.includes(`://${h}/`))
@@ -172,6 +193,9 @@ async function main() {
     // Generate mirror URLs
     for (const mirrorHost of MIRROR_HOSTS) {
       const mirrorUrl = `https://${mirrorHost}/file/${path}`
+      // Skip if we already generated this mirror URL (from a duplicate original)
+      if (seenMirrorUrls.has(mirrorUrl)) continue
+      seenMirrorUrls.add(mirrorUrl)
       mirrorCandidates.push({
         originalRow: row,
         mirrorHost,
@@ -180,7 +204,7 @@ async function main() {
     }
   }
 
-  console.log(`🔍 Generated ${mirrorCandidates.length} mirror URL candidates\n`)
+  console.log(`🔍 Generated ${mirrorCandidates.length} unique mirror URL candidates\n`)
 
   if (mirrorCandidates.length === 0) {
     console.log('No mirror candidates found. Exiting.')
@@ -188,12 +212,14 @@ async function main() {
     return
   }
 
-  // Step 3: Get all existing stream URLs to check for duplicates
+  // Step 3: Check against existing URLs in database
+  // (existingUrls is built from ALL rows including duplicates, so it's
+  // a superset — safe for filtering)
   console.log('📋 Loading existing URLs to check for duplicates...')
   const existingUrls = new Set(result.rows.map((r) => r.streamUrl))
-  console.log(`   ${existingUrls.size} existing URLs loaded\n`)
+  console.log(`   ${existingUrls.size} unique existing URLs loaded\n`)
 
-  // Filter out candidates that already exist
+  // Filter out candidates that already exist in database
   const newCandidates = mirrorCandidates.filter((c) => !existingUrls.has(c.mirrorUrl))
   const duplicateCount = mirrorCandidates.length - newCandidates.length
   console.log(`   ${duplicateCount} already stored (will skip)`)
