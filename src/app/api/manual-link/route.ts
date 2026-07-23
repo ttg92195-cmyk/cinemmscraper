@@ -66,7 +66,7 @@ interface SubmitResult {
 
 function parseQuality(url: string): string {
   const m = url.match(/(8K|4K|2160p|1080p|720p|480p)/i)
-  return m ? m[1].toUpperCase() : 'STD'
+  return m ? m[1].toUpperCase() : 'SD'
 }
 
 function parseFormat(url: string): string {

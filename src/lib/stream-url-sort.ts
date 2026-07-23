@@ -79,7 +79,7 @@ function getHostRank(host: string): number {
  * Parse quality string into a numeric rank (lower = higher quality).
  *
  * cinemm.com returns quality strings like: "4K", "2160P", "1080P", "720P",
- * "480P", "STD", "" (empty).
+ * "480P", "SD", "" (empty).
  *
  * We normalize:
  *   "4K"     → 1  (highest)
@@ -87,9 +87,12 @@ function getHostRank(host: string): number {
  *   "1080P"  → 2
  *   "720P"   → 3
  *   "480P"   → 4
- *   "STD"    → 5  (standard definition, unknown resolution)
- *   ""       → 5  (empty — treat as STD)
+ *   "SD"     → 5  (standard definition, unknown resolution)
+ *   ""       → 5  (empty — treat as SD)
  *   unknown  → 6  (last resort)
+ *
+ * NOTE: We also accept "STD" (legacy — was used before the SD rename)
+ *       for backward compatibility with existing database rows.
  */
 function getQualityRank(quality: string): number {
   if (!quality) return 5
@@ -102,8 +105,8 @@ function getQualityRank(quality: string): number {
   if (q === '720P' || q === '720') return 3
   // 480P
   if (q === '480P' || q === '480') return 4
-  // STD / standard / unknown text
-  if (q === 'STD' || q === 'STANDARD') return 5
+  // SD / STD / standard / unknown text
+  if (q === 'SD' || q === 'STD' || q === 'STANDARD') return 5
   // Try to parse as number (e.g. "1440P" → between 1080 and 2160)
   const numMatch = q.match(/^(\d{3,4})P?$/)
   if (numMatch) {

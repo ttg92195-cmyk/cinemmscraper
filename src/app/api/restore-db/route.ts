@@ -91,7 +91,7 @@ export async function POST(req: NextRequest) {
           where: { id: existing.id },
           data: {
             streamUrl: entry.streamUrl,
-            quality: entry.quality || 'STD',
+            quality: entry.quality || 'SD',
             format: entry.format || '',
             host: entry.host || 'unknown',
             fileName: entry.fileName || '',
@@ -108,7 +108,7 @@ export async function POST(req: NextRequest) {
             episodeId: epId,
             shortlink: entry.shortlink,
             streamUrl: entry.streamUrl,
-            quality: entry.quality || 'STD',
+            quality: entry.quality || 'SD',
             format: entry.format || '',
             host: entry.host || 'unknown',
             fileName: entry.fileName || '',

@@ -3075,7 +3075,7 @@ function TelegramStreamLinks({ urls, cached }: { urls: string[]; cached: boolean
   // Parse quality + format from URL — e.g. ...Inception.2010.UHD.BluRay.2160p.4K...mkv
   function parseQuality(url: string): string {
     const m = url.match(/(8K|4K|2160p|1080p|720p|480p)/i)
-    return m ? m[1].toUpperCase() : 'STD'
+    return m ? m[1].toUpperCase() : 'SD'
   }
   function parseFormat(url: string): string {
     const m = url.match(/\.(mkv|mp4|avi|mov|webm)(?:\?|$)/i)
@@ -3291,7 +3291,7 @@ function ShortlinkResolver() {
 
   function parseQuality(url: string): string {
     const m = url.match(/(8K|4K|2160p|1080p|720p|480p)/i)
-    return m ? m[1].toUpperCase() : 'STD'
+    return m ? m[1].toUpperCase() : 'SD'
   }
   function parseFormat(url: string): string {
     const m = url.match(/\.(mkv|mp4|avi|mov|webm)(?:\?|$)/i)
