@@ -3043,15 +3043,22 @@ function ManualLinksEditor({
 function TelegramStreamLinks({ urls, cached }: { urls: string[]; cached: boolean }) {
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
 
-  // Parse quality + format from URL — e.g. ...Inception.2010.UHD.BluRay.2160p.4K...mkv
-  // IMPORTANT: Check resolution-specific patterns (2160p, 1080p, 720p, 480p)
-  // BEFORE 4K/8K, because "4K" can appear in path segments and cause false
-  // matches for 1080p/720p files.
+  // Parse quality from FILENAME only (not full URL).
+  // The URL path may contain "4k" in folder names, which would cause
+  // false matches. We extract the filename and check quality patterns there.
   function parseQuality(url: string): string {
-    const m = url.match(/(2160p|1080p|720p|480p|8K|4K)/i)
-    const result = m ? m[1].toUpperCase() : 'SD'
-    if (result === '2160P') return '4K'
-    return result
+    try {
+      const u = new URL(url)
+      const parts = u.pathname.split('/').filter(Boolean)
+      const fileName = decodeURIComponent(parts[parts.length - 1] || '')
+      if (/2160p/i.test(fileName)) return '4K'
+      if (/1080p/i.test(fileName)) return '1080P'
+      if (/720p/i.test(fileName)) return '720P'
+      if (/480p/i.test(fileName)) return '480P'
+      if (/8k/i.test(fileName)) return '8K'
+      if (/4k/i.test(fileName)) return '4K'
+    } catch {}
+    return 'SD'
   }
   function parseFormat(url: string): string {
     const m = url.match(/\.(mkv|mp4|avi|mov|webm)(?:\?|$)/i)
@@ -3266,10 +3273,18 @@ function ShortlinkResolver() {
   }
 
   function parseQuality(url: string): string {
-    const m = url.match(/(2160p|1080p|720p|480p|8K|4K)/i)
-    const result = m ? m[1].toUpperCase() : 'SD'
-    if (result === '2160P') return '4K'
-    return result
+    try {
+      const u = new URL(url)
+      const parts = u.pathname.split('/').filter(Boolean)
+      const fileName = decodeURIComponent(parts[parts.length - 1] || '')
+      if (/2160p/i.test(fileName)) return '4K'
+      if (/1080p/i.test(fileName)) return '1080P'
+      if (/720p/i.test(fileName)) return '720P'
+      if (/480p/i.test(fileName)) return '480P'
+      if (/8k/i.test(fileName)) return '8K'
+      if (/4k/i.test(fileName)) return '4K'
+    } catch {}
+    return 'SD'
   }
   function parseFormat(url: string): string {
     const m = url.match(/\.(mkv|mp4|avi|mov|webm)(?:\?|$)/i)

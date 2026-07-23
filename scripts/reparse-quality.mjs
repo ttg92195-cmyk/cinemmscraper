@@ -34,15 +34,23 @@ if (!dbUrl) {
 }
 
 /**
- * NEW parseQuality — resolution-specific patterns first.
- * 2160p, 1080p, 720p, 480p are checked before 4K/8K to avoid false
- * matches when "4K" appears in URL path segments.
+ * NEW parseQuality — parse from FILENAME only, not full URL.
+ * The URL path may contain "4k" in folder names (e.g. "/4k-movies/"),
+ * which causes false matches. We extract the filename and check there.
  */
 function parseQuality(url) {
-  const m = url.match(/(2160p|1080p|720p|480p|8K|4K)/i)
-  const result = m ? m[1].toUpperCase() : 'SD'
-  if (result === '2160P') return '4K'
-  return result
+  try {
+    const u = new URL(url)
+    const parts = u.pathname.split('/').filter(Boolean)
+    const fileName = decodeURIComponent(parts[parts.length - 1] || '')
+    if (/2160p/i.test(fileName)) return '4K'
+    if (/1080p/i.test(fileName)) return '1080P'
+    if (/720p/i.test(fileName)) return '720P'
+    if (/480p/i.test(fileName)) return '480P'
+    if (/8k/i.test(fileName)) return '8K'
+    if (/4k/i.test(fileName)) return '4K'
+  } catch {}
+  return 'SD'
 }
 
 async function main() {

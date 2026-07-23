@@ -65,24 +65,29 @@ interface SubmitResult {
 }
 
 function parseQuality(url: string): string {
-  // Match quality patterns in order of specificity (most specific first).
-  // IMPORTANT: Check 1080p/720p/480p/2160p BEFORE 4K, because "4K" can
-  // appear inside other quality strings (e.g. "2160p 4K UHD" — we want
-  // 2160p, but if 4K is matched first, we'd return 4K which is correct
-  // for that file but WRONG for "1080p SDR" files that don't contain 4K).
+  // CRITICAL FIX: Parse quality from FILENAME only, not the full URL.
   //
-  // The real bug: regex /(8K|4K|2160p|1080p|720p|480p)/i matches the
-  // FIRST occurrence in the URL. If a URL contains "4K" anywhere (even
-  // in a path segment like "/4k-movies/"), it returns "4K" for ALL
-  // files in that path — including 1080p and 720p files.
+  // The old approach matched quality patterns against the entire URL string.
+  // But JavaScript's regex match() returns the LEFTMOST match in the string,
+  // not the first alternative in the pattern. So if the URL path contains
+  // "4k" (e.g. "/4k-movies/The Avengers 720p.mp4"), the regex would match
+  // "4k" from the path BEFORE "720p" from the filename — returning "4K"
+  // for a 720p file.
   //
-  // Fix: check resolution-specific patterns first (2160p, 1080p, 720p,
-  // 480p), then fall back to 4K/8K (which are less specific).
-  const m = url.match(/(2160p|1080p|720p|480p|8K|4K)/i)
-  const result = m ? m[1].toUpperCase() : 'SD'
-  // Normalize: 2160P → 4K (they're the same resolution, 4K is more common label)
-  if (result === '2160P') return '4K'
-  return result
+  // Fix: Extract the filename (last path segment) and parse quality from
+  // that alone. The filename always contains the actual quality.
+  const fileName = parseFileName(url)
+
+  // Check resolution-specific patterns in the FILENAME.
+  // Order doesn't matter here because we're only looking at the filename,
+  // which contains exactly one quality indicator.
+  if (/2160p/i.test(fileName)) return '4K'
+  if (/1080p/i.test(fileName)) return '1080P'
+  if (/720p/i.test(fileName)) return '720P'
+  if (/480p/i.test(fileName)) return '480P'
+  if (/8k/i.test(fileName)) return '8K'
+  if (/4k/i.test(fileName)) return '4K'
+  return 'SD'
 }
 
 function parseFormat(url: string): string {
