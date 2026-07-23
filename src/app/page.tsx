@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
-import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight, ArrowLeft, KeyRound, Settings, Plus, Zap, ChevronLeft, Send, Upload, Trash2, RefreshCw } from 'lucide-react'
+import { Search, Film, Tv, Download, Loader2, AlertTriangle, ExternalLink, Database, Copy, Check, X, Image as ImageIcon, ChevronRight, ArrowLeft, KeyRound, Settings, Plus, Zap, ChevronLeft, Send, Upload, Trash2, RefreshCw, CheckSquare, Square } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -1855,14 +1855,42 @@ export default function Home() {
                   <span className="ml-2 text-purple-400">({selectedIds.size} selected)</span>
                 )}
               </div>
-              <div className="flex gap-2">
-                {selectedIds.size > 0 && (
+              <div className="flex gap-2 flex-wrap">
+                {/* Select All / Deselect All — toggles between states */}
+                {selectedIds.size === results.length ? (
+                  // All selected → show "Deselect All"
                   <Button
                     size="sm"
                     onClick={() => setSelectedIds(new Set())}
                     className="bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs"
                   >
-                    Clear selection
+                    <Square className="w-3 h-3 mr-1" />
+                    Deselect All
+                  </Button>
+                ) : (
+                  // Not all selected → show "Select All"
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      const all = new Set<number>()
+                      results.forEach((r) => all.add(r.id))
+                      setSelectedIds(all)
+                    }}
+                    className="bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs"
+                  >
+                    <CheckSquare className="w-3 h-3 mr-1" />
+                    Select All ({results.length})
+                  </Button>
+                )}
+                {selectedIds.size > 0 && selectedIds.size !== results.length && (
+                  // Partial selection → show Clear too
+                  <Button
+                    size="sm"
+                    onClick={() => setSelectedIds(new Set())}
+                    className="bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs"
+                  >
+                    <X className="w-3 h-3 mr-1" />
+                    Clear
                   </Button>
                 )}
                 {selectedIds.size > 0 && (
