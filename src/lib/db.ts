@@ -44,6 +44,36 @@ function resolveDatabaseUrl(): string {
 
 const databaseUrl = resolveDatabaseUrl()
 
+// Add ?pgBouncer=true&connection_limit=1 to the DATABASE_URL if it uses
+// the Supabase transaction pooler (port 6543). This is REQUIRED because:
+//
+// - Prisma uses prepared statements by default (for performance)
+// - Supabase's transaction pooler (PgBouncer) doesn't support prepared
+//   statements — it kills connections between transactions, which
+//   invalidates the prepared statements
+// - Result without pgBouncer=true: "prepared statement s15 does not exist"
+//   errors on every request
+//
+// The pgBouncer=true parameter tells Prisma to NOT use prepared statements,
+// which is compatible with the transaction pooler.
+//
+// connection_limit=1 is recommended for serverless environments to avoid
+// exhausting the pool.
+function buildConnectionUrl(rawUrl: string): string {
+  // If URL already has query params, append to them; otherwise add ?
+  const separator = rawUrl.includes('?') ? '&' : '?'
+  // Check if pgBouncer is already set
+  if (rawUrl.includes('pgBouncer=')) return rawUrl
+  // Only add pgBouncer=true for transaction pooler (port 6543)
+  // Session mode (port 5432) doesn't need it
+  if (rawUrl.includes(':6543/')) {
+    return `${rawUrl}${separator}pgBouncer=true&connection_limit=1`
+  }
+  return rawUrl
+}
+
+const finalDatabaseUrl = buildConnectionUrl(databaseUrl)
+
 // Use a single Prisma client per process (avoid exhausting connections in
 // serverless environments like Vercel).
 export const db =
@@ -51,7 +81,7 @@ export const db =
   new PrismaClient({
     log: ['error', 'warn'],
     datasources: {
-      db: { url: databaseUrl },
+      db: { url: finalDatabaseUrl },
     },
   })
 
