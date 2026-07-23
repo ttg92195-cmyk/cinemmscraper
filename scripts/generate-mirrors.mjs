@@ -125,8 +125,10 @@ async function main() {
   // We use a SINGLE client for all operations (read existing URLs + insert new ones)
   // to stay under the limit. HEAD requests go to CDN hosts (not Postgres), so they
   // don't count toward the connection pool — only the DB queries do.
+  let connStr = dbUrl
+  if (connStr.includes(':5432/')) connStr = connStr.replace(':5432/', ':6543/')
   const client = new Client({
-    connectionString: dbUrl,
+    connectionString: connStr,
     connectionTimeoutMillis: 30000,
     // Lower statement_timeout so a slow query doesn't hang the whole script
     statement_timeout: 60000,

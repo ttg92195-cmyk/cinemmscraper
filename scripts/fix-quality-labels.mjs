@@ -32,8 +32,18 @@ async function main() {
   }
 
   const { Client } = pg
+  // Use transaction pooler (port 6543) instead of session mode (port 5432).
+  // Session mode has a hard limit of 15 connections on Supabase free tier,
+  // and Vercel serverless functions often exhaust the pool.
+  // Transaction pooler allows many more short-lived connections.
+  //
+  // Bro's DATABASE_URL uses port 5432 (session mode). We swap to 6543 here.
+  let connStr = dbUrl
+  if (connStr.includes(':5432/')) {
+    connStr = connStr.replace(':5432/', ':6543/')
+  }
   const client = new Client({
-    connectionString: dbUrl,
+    connectionString: connStr,
     connectionTimeoutMillis: 30000,
     statement_timeout: 60000,
   })

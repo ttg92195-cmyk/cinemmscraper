@@ -38,8 +38,10 @@ async function main() {
   }
 
   const { Client } = pg
+  let connStr = dbUrl
+  if (connStr.includes(':5432/')) connStr = connStr.replace(':5432/', ':6543/')
   const client = new Client({
-    connectionString: dbUrl,
+    connectionString: connStr,
     connectionTimeoutMillis: 15000,
   })
 

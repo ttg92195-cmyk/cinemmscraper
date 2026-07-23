@@ -45,8 +45,10 @@ async function main() {
   }
 
   const { Client } = pg
+  let connStr = dbUrl
+  if (connStr.includes(':5432/')) connStr = connStr.replace(':5432/', ':6543/')
   const client = new Client({
-    connectionString: dbUrl,
+    connectionString: connStr,
     connectionTimeoutMillis: 30000,
     statement_timeout: 120000, // 2 min — dedup query can be slow on 65k rows
   })
