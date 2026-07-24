@@ -1855,14 +1855,36 @@ export default function Home() {
                   <span className="ml-2 text-purple-400">({selectedIds.size} selected)</span>
                 )}
               </div>
-              <div className="flex gap-2">
-                {selectedIds.size > 0 && (
+              <div className="flex gap-2 flex-wrap">
+                {/* Select All / Deselect All — toggles between states */}
+                {selectedIds.size === results.length ? (
                   <Button
                     size="sm"
                     onClick={() => setSelectedIds(new Set())}
                     className="bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs"
                   >
-                    Clear selection
+                    Deselect All
+                  </Button>
+                ) : (
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      const all = new Set<number>()
+                      results.forEach((r) => all.add(r.id))
+                      setSelectedIds(all)
+                    }}
+                    className="bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs"
+                  >
+                    Select All ({results.length})
+                  </Button>
+                )}
+                {selectedIds.size > 0 && selectedIds.size !== results.length && (
+                  <Button
+                    size="sm"
+                    onClick={() => setSelectedIds(new Set())}
+                    className="bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs"
+                  >
+                    Clear
                   </Button>
                 )}
                 {selectedIds.size > 0 && (
