@@ -52,16 +52,17 @@ interface StreamUrlEntry {
 // ---------------------------------------------------------------------------
 
 const HOST_PRIORITY: Array<{ pattern: RegExp; rank: number }> = [
-  // Mirror hosts (Bro's discovery — preferred)
+  // Mirror hosts (Bro's discoveries — preferred, faster)
   { pattern: /^md2\.streammedia2\.com$/i, rank: 1 },
   { pattern: /^media\.bioscopeapplication\.com$/i, rank: 2 },
+  { pattern: /^stream\.cmapplication\.site$/i, rank: 3 }, // Day 8 discovery
   // cinemm.com's original hosts
-  { pattern: /^stream\.cmreel\.com$/i, rank: 3 },
-  { pattern: /^stream\.bioscopeapp\.com$/i, rank: 4 },
+  { pattern: /^stream\.cmreel\.com$/i, rank: 4 },
+  { pattern: /^stream\.bioscopeapp\.com$/i, rank: 5 },
   // cmdrive hosts (slower)
-  { pattern: /^cmappfirst\d*\.cmdrive\.xyz$/i, rank: 5 },
-  { pattern: /^cmappsecond\d*\.cmdrive\.xyz$/i, rank: 6 },
-  { pattern: /^cmapp.*\.cmdrive\.xyz$/i, rank: 7 },
+  { pattern: /^cmappfirst\d*\.cmdrive\.xyz$/i, rank: 6 },
+  { pattern: /^cmappsecond\d*\.cmdrive\.xyz$/i, rank: 7 },
+  { pattern: /^cmapp.*\.cmdrive\.xyz$/i, rank: 8 },
 ]
 
 function getHostRank(host: string): number {

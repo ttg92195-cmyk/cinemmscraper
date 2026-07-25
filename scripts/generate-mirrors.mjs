@@ -36,6 +36,7 @@
 const MIRROR_HOSTS = [
   'media.bioscopeapplication.com',
   'md2.streammedia2.com',
+  'stream.cmapplication.site', // Bro's Day 8 discovery — new mirror host
 ]
 
 // Hosts we treat as "source" hosts — URLs from these are used to generate mirrors.
