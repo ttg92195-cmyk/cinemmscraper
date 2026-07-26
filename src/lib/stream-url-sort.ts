@@ -52,17 +52,18 @@ interface StreamUrlEntry {
 // ---------------------------------------------------------------------------
 
 const HOST_PRIORITY: Array<{ pattern: RegExp; rank: number }> = [
-  // Mirror hosts (Bro's discoveries — preferred, faster)
+  // Mirror hosts (Bro's discoveries — preferred, work in Myanmar without VPN)
   { pattern: /^md2\.streammedia2\.com$/i, rank: 1 },
   { pattern: /^media\.bioscopeapplication\.com$/i, rank: 2 },
-  { pattern: /^stream\.cmapplication\.site$/i, rank: 3 }, // Day 8 discovery
-  // cinemm.com's original hosts
-  { pattern: /^stream\.cmreel\.com$/i, rank: 4 },
-  { pattern: /^stream\.bioscopeapp\.com$/i, rank: 5 },
+  { pattern: /^stream\.cmapplication\.site$/i, rank: 3 },
+  { pattern: /^media\.bs-sh\.co$/i, rank: 4 }, // Day 9 — works in Myanmar!
+  // cinemm.com's original hosts (may be blocked in Myanmar — ERR_CONNECTION_RESET)
+  { pattern: /^stream\.cmreel\.com$/i, rank: 5 },
+  { pattern: /^stream\.bioscopeapp\.com$/i, rank: 6 },
   // cmdrive hosts (slower)
-  { pattern: /^cmappfirst\d*\.cmdrive\.xyz$/i, rank: 6 },
-  { pattern: /^cmappsecond\d*\.cmdrive\.xyz$/i, rank: 7 },
-  { pattern: /^cmapp.*\.cmdrive\.xyz$/i, rank: 8 },
+  { pattern: /^cmappfirst\d*\.cmdrive\.xyz$/i, rank: 7 },
+  { pattern: /^cmappsecond\d*\.cmdrive\.xyz$/i, rank: 8 },
+  { pattern: /^cmapp.*\.cmdrive\.xyz$/i, rank: 9 },
 ]
 
 function getHostRank(host: string): number {
