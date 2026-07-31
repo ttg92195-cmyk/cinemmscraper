@@ -216,12 +216,16 @@ async function main() {
 
   // Step 1: Get random movies from database that have existing URLs
   console.log('📥 Selecting random movies from database...\n')
+  // Use a subquery to get distinct mediaIds first, then order by random()
+  // (Postgres doesn't allow ORDER BY RANDOM() directly with SELECT DISTINCT)
   const result = await client.query(`
-    SELECT DISTINCT "mediaId"
-    FROM "ManualStreamUrl"
-    WHERE "mediaType" = 'movie'
-      AND "episodeId" IS NULL
-      AND "expiresAt" > NOW()
+    SELECT "mediaId" FROM (
+      SELECT DISTINCT "mediaId"
+      FROM "ManualStreamUrl"
+      WHERE "mediaType" = 'movie'
+        AND "episodeId" IS NULL
+        AND "expiresAt" > NOW()
+    ) AS distinct_movies
     ORDER BY RANDOM()
     LIMIT $1
   `, [sampleSize])
