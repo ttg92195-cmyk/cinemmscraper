@@ -211,7 +211,7 @@ async function main() {
 
   let allItems = []
   let totalPages = 0
-  let maxPages = 20 // safety limit: don't fetch more than 20 pages (1200 items)
+  let maxPages = 50 // fetch up to 50 pages (3000 items) to find new movies
   let totalAvailable = 0
 
   for (let p = 1; p <= maxPages; p++) {
@@ -222,32 +222,18 @@ async function main() {
       console.log(`   Total ${type}s available: ${cat.total.toLocaleString()}`)
     }
 
-    // For each catalog item, we can't know the cinemmId without a search call.
-    // But we CAN check if the poster URL path is already in our DB.
-    // Catalog items use sequential IDs — if we've seen items with similar names
-    // before, they're likely already imported.
-    //
-    // Simpler approach: just collect ALL items, and let the worker skip them
-    // after searching (the search returns cinemmId which we check against existingIds).
     allItems = allItems.concat(cat.results)
 
-    // Check if we have enough items (accounting for ~30% skip rate)
-    if (allItems.length >= limit * 2) {
-      console.log(`   Fetched ${allItems.length} items from ${p} page(s) — enough to find ${limit} new ones`)
+    // Check if we have enough items (accounting for ~50% skip rate)
+    if (allItems.length >= limit * 3) {
+      console.log(`   Fetched ${allItems.length} items from ${p} page(s)`)
       break
     }
 
     if (p < maxPages) await sleep(300)
   }
 
-  // Filter: remove items whose name exactly matches an existing movie name
-  // (quick pre-filter to reduce search API calls)
-  // We'll also do the real check (cinemmId) in the worker.
-  const existingNames = new Set()
-  // We don't store movie names in ManualStreamUrl, so we can't pre-filter by name.
-  // The worker will search → get cinemmId → check existingIds.
-
-  const items = allItems.slice(0, Math.min(allItems.length, limit * 3)) // fetch 3x to account for skips
+  const items = allItems
   console.log(`   Collected ${items.length} items from ${totalPages} page(s)`)
   console.log(`   (Will process until ${limit} new ones are found)\n`)
 
@@ -261,21 +247,29 @@ async function main() {
   // ---------- Process one movie ----------
   async function processOneMovie(item) {
     try {
-      // Search for cinemm.com ID
-      const searchRes = await fetch(`${MOVIESMM_URL}/api/cinemm`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'search', args: [item.name, type] }),
-        signal: AbortSignal.timeout(15000),
-      })
-      const searchData = await searchRes.json()
-      if (!searchData.ok || !searchData.results?.length) return { status: 'skip' }
+      let cinemmId = item.id
 
-      const match = searchData.results.find(r =>
-        r.name?.toLowerCase() === item.name?.toLowerCase()
-      ) || searchData.results[0]
-      const cinemmId = match.id
+      // Catalog items can have EITHER:
+      // - cinemm.com bigint ID (>15 digits, e.g. 1963177111485498) → use directly
+      // - sequential ID (small number, e.g. 24603) → need to search by name
+      if (cinemmId < 1000000000000000) {
+        // Sequential ID — search by name to get cinemm.com ID
+        const searchRes = await fetch(`${MOVIESMM_URL}/api/cinemm`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'search', args: [item.name, type] }),
+          signal: AbortSignal.timeout(15000),
+        })
+        const searchData = await searchRes.json()
+        if (!searchData.ok || !searchData.results?.length) return { status: 'skip' }
 
+        const match = searchData.results.find(r =>
+          r.name?.toLowerCase() === item.name?.toLowerCase()
+        ) || searchData.results[0]
+        cinemmId = match.id
+      }
+
+      // Check if already in DB
       if (existingIds.has(String(cinemmId))) return { status: 'skip' }
 
       // NEW movie! Fetch sources
