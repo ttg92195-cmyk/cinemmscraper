@@ -174,32 +174,88 @@ async function main() {
   client.on('error', (err) => console.error('⚠️  Postgres error:', err.message))
   await client.connect()
 
-  // Step 1: Fetch catalog
+  // Step 1: Fetch catalog — keep fetching pages until we have enough NEW movies
   console.log(`📥 Fetching ${type} catalog from moviesmm.com...\n`)
   const pageSize = 60
-  const pagesNeeded = Math.ceil(limit / pageSize)
-  let allItems = []
-  for (let p = 1; p <= pagesNeeded; p++) {
-    const cat = await fetchCatalog(type, p, pageSize)
-    allItems = allItems.concat(cat.results)
-    if (p === 1) console.log(`   Total ${type}s available: ${cat.total.toLocaleString()}`)
-    if (p < pagesNeeded) await sleep(300)
-  }
-  const items = allItems.slice(0, limit)
-  console.log(`   Fetched ${items.length} items\n`)
 
-  // Get existing IDs
+  // Get existing IDs FIRST so we can skip known movies
   const existingResult = await client.query(
     `SELECT DISTINCT "mediaId" FROM "ManualStreamUrl" WHERE "mediaType" = $1 AND "expiresAt" > NOW()`,
     [type],
   )
   const existingIds = new Set(existingResult.rows.map(r => r.mediaId))
-  console.log(`   Already in our DB: ${existingIds.size.toLocaleString()} ${type}s\n`)
+  console.log(`   Already in our DB: ${existingIds.size.toLocaleString()} ${type}s`)
+
+  // Fetch pages until we have enough NEW items (not in our DB)
+  // Strategy: fetch pages, filter out items whose name matches existing entries
+  // We can't check by cinemmId yet (that requires a search call), so we filter
+  // by checking if the poster URL is already in our DB (poster is unique per movie)
+  const existingPosters = new Set()
+  const posterResult = await client.query(
+    `SELECT DISTINCT "shortlink" FROM "ManualStreamUrl" WHERE "mediaType" = $1 AND "expiresAt" > NOW() AND "shortlink" LIKE '%cinemm.com%'`,
+    [type],
+  )
+  // Also get all stream URLs to check host+path
+  const urlResult = await client.query(
+    `SELECT "streamUrl" FROM "ManualStreamUrl" WHERE "mediaType" = $1 AND "expiresAt" > NOW()`,
+    [type],
+  )
+  const existingUrlPaths = new Set()
+  for (const row of urlResult.rows) {
+    try {
+      const u = new URL(row.streamUrl)
+      // Store just the pathname (without host) for matching
+      existingUrlPaths.add(u.pathname)
+    } catch {}
+  }
+
+  let allItems = []
+  let totalPages = 0
+  let maxPages = 20 // safety limit: don't fetch more than 20 pages (1200 items)
+  let totalAvailable = 0
+
+  for (let p = 1; p <= maxPages; p++) {
+    const cat = await fetchCatalog(type, p, pageSize)
+    totalPages = p
+    if (p === 1) {
+      totalAvailable = cat.total
+      console.log(`   Total ${type}s available: ${cat.total.toLocaleString()}`)
+    }
+
+    // For each catalog item, we can't know the cinemmId without a search call.
+    // But we CAN check if the poster URL path is already in our DB.
+    // Catalog items use sequential IDs — if we've seen items with similar names
+    // before, they're likely already imported.
+    //
+    // Simpler approach: just collect ALL items, and let the worker skip them
+    // after searching (the search returns cinemmId which we check against existingIds).
+    allItems = allItems.concat(cat.results)
+
+    // Check if we have enough items (accounting for ~30% skip rate)
+    if (allItems.length >= limit * 2) {
+      console.log(`   Fetched ${allItems.length} items from ${p} page(s) — enough to find ${limit} new ones`)
+      break
+    }
+
+    if (p < maxPages) await sleep(300)
+  }
+
+  // Filter: remove items whose name exactly matches an existing movie name
+  // (quick pre-filter to reduce search API calls)
+  // We'll also do the real check (cinemmId) in the worker.
+  const existingNames = new Set()
+  // We don't store movie names in ManualStreamUrl, so we can't pre-filter by name.
+  // The worker will search → get cinemmId → check existingIds.
+
+  const items = allItems.slice(0, Math.min(allItems.length, limit * 3)) // fetch 3x to account for skips
+  console.log(`   Collected ${items.length} items from ${totalPages} page(s)`)
+  console.log(`   (Will process until ${limit} new ones are found)\n`)
 
   let processed = 0
   let skipped = 0
   let totalUrlsStored = 0
   let failed = 0
+  let newMoviesFound = 0
   let nextIndex = 0
 
   // ---------- Process one movie ----------
@@ -222,14 +278,14 @@ async function main() {
 
       if (existingIds.has(String(cinemmId))) return { status: 'skip' }
 
-      // Fetch sources
+      // NEW movie! Fetch sources
       const sources = await fetchMovieSources(cinemmId)
       if (!sources.ok || sources.access !== 'direct') return { status: 'skip' }
 
       const servers = sources.servers || []
       if (!servers.length) return { status: 'skip' }
 
-      // Resolve shortlinks IN PARALLEL (big speedup!)
+      // Resolve shortlinks IN PARALLEL
       const resolveResults = await Promise.all(
         servers.map(async (server) => {
           const playUrl = server.playUrl || server.url
@@ -272,32 +328,39 @@ async function main() {
         }
         const sql = `INSERT INTO "ManualStreamUrl"("id","mediaId","mediaType","episodeId","shortlink","streamUrl","quality","format","host","fileName","fileSize","createdAt","expiresAt") VALUES ${placeholders.join(',')} ON CONFLICT DO NOTHING`
         const result = await client.query(sql, params)
-        return { status: 'ok', urls: result.rowCount || 0, name: item.name }
+        return { status: 'ok', urls: result.rowCount || 0, name: item.name, cinemmId }
       }
-      return { status: 'ok', urls: streamUrls.length, name: item.name }
+      return { status: 'ok', urls: streamUrls.length, name: item.name, cinemmId }
     } catch (e) {
       return { status: 'error', error: e.message, name: item.name }
     }
   }
 
   // ---------- Concurrent workers ----------
-  console.log(`🚀 Processing ${items.length} ${type}(s) with ${CONCURRENCY} workers...\n`)
+  // Process items until we find `limit` NEW movies
+  console.log(`🚀 Processing items with ${CONCURRENCY} workers (target: ${limit} new ${type}s)...\n`)
 
   async function worker(wid) {
     while (true) {
+      // Stop if we've found enough new movies
+      if (newMoviesFound >= limit) return
       const i = nextIndex++
       if (i >= items.length) return
       const item = items[i]
+
       const r = await processOneMovie(item)
       processed++
+
       if (r.status === 'ok') {
+        newMoviesFound++
         totalUrlsStored += r.urls
-        console.log(`   [${processed}/${items.length}] ✅ ${item.name} → ${r.urls} URLs (w${wid})`)
+        existingIds.add(String(r.cinemmId)) // prevent re-processing
+        console.log(`   [${newMoviesFound}/${limit}] ✅ ${item.name} → ${r.urls} URLs (w${wid})`)
       } else if (r.status === 'skip') {
         skipped++
       } else {
         failed++
-        if (failed <= 10) console.log(`   [${processed}/${items.length}] ❌ ${item.name}: ${r.error}`)
+        if (failed <= 10) console.log(`   ❌ ${item.name}: ${r.error}`)
       }
       await sleep(DELAY_MS / CONCURRENCY)
     }
@@ -311,10 +374,11 @@ async function main() {
   console.log('\n═══════════════════════════════════════════════════════')
   console.log('  📊 SUMMARY')
   console.log('═══════════════════════════════════════════════════════\n')
-  console.log(`  Processed:       ${processed}`)
-  console.log(`  ✅ URLs stored:  ${totalUrlsStored}`)
-  console.log(`  ⏭️ Skipped:      ${skipped}`)
-  console.log(`  ❌ Failed:       ${failed}`)
+  console.log(`  Items checked:     ${processed}`)
+  console.log(`  ✅ New ${type}s:    ${newMoviesFound}`)
+  console.log(`  ✅ URLs stored:    ${totalUrlsStored}`)
+  console.log(`  ⏭️ Skipped (old):  ${skipped}`)
+  console.log(`  ❌ Failed:         ${failed}`)
   const fc = await client.query(`SELECT COUNT(*)::int c FROM "ManualStreamUrl" WHERE "expiresAt">NOW()`)
   console.log(`\n  Total URLs: ${fc.rows[0].c.toLocaleString()}`)
   console.log('\n═══════════════════════════════════════════════════════')
