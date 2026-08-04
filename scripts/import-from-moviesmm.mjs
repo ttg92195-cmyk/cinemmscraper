@@ -174,11 +174,13 @@ async function main() {
   client.on('error', (err) => console.error('⚠️  Postgres error:', err.message))
   await client.connect()
 
-  // Step 1: Fetch catalog — keep fetching pages until we have enough NEW movies
+  // Step 1: Fetch catalog — start from a RANDOM page to find new movies
+  // The newest movies (pages 1-5) are already in our DB.
+  // Starting from a random page finds movies we haven't imported yet.
   console.log(`📥 Fetching ${type} catalog from moviesmm.com...\n`)
   const pageSize = 60
 
-  // Get existing IDs FIRST so we can skip known movies
+  // Get existing IDs FIRST
   const existingResult = await client.query(
     `SELECT DISTINCT "mediaId" FROM "ManualStreamUrl" WHERE "mediaType" = $1 AND "expiresAt" > NOW()`,
     [type],
@@ -186,55 +188,31 @@ async function main() {
   const existingIds = new Set(existingResult.rows.map(r => r.mediaId))
   console.log(`   Already in our DB: ${existingIds.size.toLocaleString()} ${type}s`)
 
-  // Fetch pages until we have enough NEW items (not in our DB)
-  // Strategy: fetch pages, filter out items whose name matches existing entries
-  // We can't check by cinemmId yet (that requires a search call), so we filter
-  // by checking if the poster URL is already in our DB (poster is unique per movie)
-  const existingPosters = new Set()
-  const posterResult = await client.query(
-    `SELECT DISTINCT "shortlink" FROM "ManualStreamUrl" WHERE "mediaType" = $1 AND "expiresAt" > NOW() AND "shortlink" LIKE '%cinemm.com%'`,
-    [type],
-  )
-  // Also get all stream URLs to check host+path
-  const urlResult = await client.query(
-    `SELECT "streamUrl" FROM "ManualStreamUrl" WHERE "mediaType" = $1 AND "expiresAt" > NOW()`,
-    [type],
-  )
-  const existingUrlPaths = new Set()
-  for (const row of urlResult.rows) {
-    try {
-      const u = new URL(row.streamUrl)
-      // Store just the pathname (without host) for matching
-      existingUrlPaths.add(u.pathname)
-    } catch {}
-  }
+  // Fetch total pages, then start from random page
+  const firstPage = await fetchCatalog(type, 1, pageSize)
+  const totalPages = firstPage.totalPages
+  console.log(`   Total ${type}s available: ${firstPage.total.toLocaleString()} (${totalPages} pages)`)
+
+  // Start from a random page (not page 1) to find movies we don't have
+  const startPage = Math.floor(Math.random() * Math.min(totalPages, 200)) + 1
+  console.log(`   Starting from page ${startPage} (random) to find new ${type}s\n`)
 
   let allItems = []
-  let totalPages = 0
-  let maxPages = 50 // fetch up to 50 pages (3000 items) to find new movies
-  let totalAvailable = 0
-
-  for (let p = 1; p <= maxPages; p++) {
+  let maxPages = 50
+  for (let i = 0; i < maxPages; i++) {
+    const p = ((startPage - 1 + i) % totalPages) + 1
     const cat = await fetchCatalog(type, p, pageSize)
-    totalPages = p
-    if (p === 1) {
-      totalAvailable = cat.total
-      console.log(`   Total ${type}s available: ${cat.total.toLocaleString()}`)
-    }
-
     allItems = allItems.concat(cat.results)
 
-    // Check if we have enough items (accounting for ~50% skip rate)
     if (allItems.length >= limit * 3) {
-      console.log(`   Fetched ${allItems.length} items from ${p} page(s)`)
+      console.log(`   Fetched ${allItems.length} items from ${i + 1} page(s)`)
       break
     }
-
-    if (p < maxPages) await sleep(300)
+    if (i < maxPages - 1) await sleep(300)
   }
 
   const items = allItems
-  console.log(`   Collected ${items.length} items from ${totalPages} page(s)`)
+  console.log(`   Collected ${items.length} items`)
   console.log(`   (Will process until ${limit} new ones are found)\n`)
 
   let processed = 0
