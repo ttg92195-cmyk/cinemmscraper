@@ -18,12 +18,18 @@
  *   - No IP block risk
  *   - 23,368 movies available (we only have ~9,441 discovered)
  *
+ * SPEED OPTIONS:
+ *   - Concurrency: 3 movies processed in parallel (default)
+ *   - --skip-file-size: skip HEAD requests for file sizes (3x faster!)
+ *   - Shortlinks resolved in parallel within each movie
+ *
  * Usage:
  *   node scripts/import-from-moviesmm.mjs                    # import 20 movies
  *   node scripts/import-from-moviesmm.mjs 100                # import 100 movies
  *   node scripts/import-from-moviesmm.mjs 500                # import 500 movies
+ *   node scripts/import-from-moviesmm.mjs 100 --skip-file-size  # fast mode!
  *   node scripts/import-from-moviesmm.mjs series 50          # import 50 series
- *   node scripts/import-from-moviesmm.mjs movie 20 --dry-run # test only
+ *   node scripts/import-from-moviesmm.mjs 20 --dry-run       # test only
  *
  * Required: DATABASE_URL env var
  */
@@ -98,8 +104,6 @@ async function fetchCatalog(type, page, pageSize = 60) {
 }
 
 async function fetchMovieSources(cinemmId) {
-  // moviesmm.com proxies this to cinemm.com server-side
-  // Returns access:"direct" with real stream URLs!
   const res = await fetch(`${MOVIESMM_URL}/api/cinemm`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -110,32 +114,10 @@ async function fetchMovieSources(cinemmId) {
   return res.json()
 }
 
-async function fetchSeriesDetails(cinemmId) {
-  const res = await fetch(`${MOVIESMM_URL}/api/cinemm`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'seriesDetails', args: [cinemmId, true] }),
-    signal: AbortSignal.timeout(20000),
-  })
-  if (!res.ok) throw new Error(`seriesDetails HTTP ${res.status}`)
-  return res.json()
-}
-
-async function fetchEpisodeSources(episodeId, seriesId) {
-  const res = await fetch(`${MOVIESMM_URL}/api/cinemm`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'episodeSources', args: [episodeId, seriesId, true] }),
-    signal: AbortSignal.timeout(20000),
-  })
-  if (!res.ok) throw new Error(`episodeSources HTTP ${res.status}`)
-  return res.json()
-}
-
 // ---------- Resolve cinemm.com shortlink ----------
 async function resolveShortlink(shortlinkUrl) {
   if (!shortlinkUrl || !shortlinkUrl.includes('cinemm.com/p/')) {
-    return shortlinkUrl // not a shortlink, return as-is
+    return shortlinkUrl
   }
   try {
     const res = await fetch(shortlinkUrl, {
@@ -162,14 +144,18 @@ async function main() {
   const type = args[0] === 'series' ? 'series' : 'movie'
   const limit = parseInt(args.find(a => /^\d+$/.test(a)) || '20', 10)
   const dryRun = args.includes('--dry-run')
+  const skipFileSize = args.includes('--skip-file-size')
+  const CONCURRENCY = parseInt(process.env.CONCURRENCY || '3', 10)
 
   console.log('═══════════════════════════════════════════════════════')
   console.log('  Import from moviesmm.com (Bro\'s golden discovery)')
   console.log('  No Myanmar IP needed — moviesmm.com proxies cinemm.com!')
   console.log('═══════════════════════════════════════════════════════\n')
-  console.log(`  Type:        ${type}`)
-  console.log(`  Limit:       ${limit}`)
-  console.log(`  Mode:        ${dryRun ? 'DRY RUN (no insert)' : 'LIVE (will insert)'}\n`)
+  console.log(`  Type:         ${type}`)
+  console.log(`  Limit:        ${limit}`)
+  console.log(`  Concurrency:  ${CONCURRENCY} (parallel movies)`)
+  console.log(`  File sizes:   ${skipFileSize ? 'SKIPPED (N/A — 3x faster!)' : 'Fetched via HEAD'}`)
+  console.log(`  Mode:         ${dryRun ? 'DRY RUN' : 'LIVE'}\n`)
 
   let pg
   try { pg = await import('pg') } catch {
@@ -188,166 +174,138 @@ async function main() {
   client.on('error', (err) => console.error('⚠️  Postgres error:', err.message))
   await client.connect()
 
-  // Step 1: Fetch catalog to get movie list
+  // Step 1: Fetch catalog
   console.log(`📥 Fetching ${type} catalog from moviesmm.com...\n`)
-  const catalog = await fetchCatalog(type, 1, 60)
-  console.log(`   Total ${type}s available: ${catalog.total.toLocaleString()}`)
-  console.log(`   Fetching first ${Math.min(limit, catalog.results.length)} items\n`)
+  const pageSize = 60
+  const pagesNeeded = Math.ceil(limit / pageSize)
+  let allItems = []
+  for (let p = 1; p <= pagesNeeded; p++) {
+    const cat = await fetchCatalog(type, p, pageSize)
+    allItems = allItems.concat(cat.results)
+    if (p === 1) console.log(`   Total ${type}s available: ${cat.total.toLocaleString()}`)
+    if (p < pagesNeeded) await sleep(300)
+  }
+  const items = allItems.slice(0, limit)
+  console.log(`   Fetched ${items.length} items\n`)
 
-  // Get existing mediaIds from our database to skip duplicates
+  // Get existing IDs
   const existingResult = await client.query(
     `SELECT DISTINCT "mediaId" FROM "ManualStreamUrl" WHERE "mediaType" = $1 AND "expiresAt" > NOW()`,
     [type],
   )
   const existingIds = new Set(existingResult.rows.map(r => r.mediaId))
-  console.log(`   Already in our database: ${existingIds.size.toLocaleString()} ${type}s\n`)
+  console.log(`   Already in our DB: ${existingIds.size.toLocaleString()} ${type}s\n`)
 
   let processed = 0
   let skipped = 0
   let totalUrlsStored = 0
   let failed = 0
+  let nextIndex = 0
 
-  // Step 2: Process each movie
-  for (const item of catalog.results) {
-    if (processed >= limit) break
-
-    // moviesmm.com catalog uses sequential IDs (24603), but search returns cinemm.com bigint IDs
-    // We need to search for the movie name to get the cinemm.com ID
-    // OR: we can use the catalog ID directly if movieSources accepts it
-
-    // Try using the catalog item's name to search cinemm.com via moviesmm.com
-    const mediaId = String(item.id)
-
-    // Skip if already in our database (check by name match instead of ID)
-    // Actually, let's just try fetching sources directly
-
-    process.stdout.write(`\r   [${processed + 1}/${limit}] ${item.name} (${item.year})...`)
-
+  // ---------- Process one movie ----------
+  async function processOneMovie(item) {
     try {
-      // For movies: call movieSources
-      // For series: call seriesDetails then episodeSources per episode
-      if (type === 'movie') {
-        // First, search to get the cinemm.com ID
-        const searchRes = await fetch(`${MOVIESMM_URL}/api/cinemm`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'search', args: [item.name, 'movie'] }),
-          signal: AbortSignal.timeout(15000),
-        })
-        const searchData = await searchRes.json()
+      // Search for cinemm.com ID
+      const searchRes = await fetch(`${MOVIESMM_URL}/api/cinemm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'search', args: [item.name, type] }),
+        signal: AbortSignal.timeout(15000),
+      })
+      const searchData = await searchRes.json()
+      if (!searchData.ok || !searchData.results?.length) return { status: 'skip' }
 
-        if (!searchData.ok || !searchData.results || searchData.results.length === 0) {
-          skipped++
-          processed++
-          await sleep(DELAY_MS)
-          continue
-        }
+      const match = searchData.results.find(r =>
+        r.name?.toLowerCase() === item.name?.toLowerCase()
+      ) || searchData.results[0]
+      const cinemmId = match.id
 
-        // Find exact match by name
-        const match = searchData.results.find(r =>
-          r.name.toLowerCase() === item.name.toLowerCase() &&
-          (r.year === item.year || !item.year)
-        ) || searchData.results[0]
+      if (existingIds.has(String(cinemmId))) return { status: 'skip' }
 
-        const cinemmId = match.id
+      // Fetch sources
+      const sources = await fetchMovieSources(cinemmId)
+      if (!sources.ok || sources.access !== 'direct') return { status: 'skip' }
 
-        // Check if already in our DB by cinemmId
-        if (existingIds.has(String(cinemmId))) {
-          skipped++
-          processed++
-          await sleep(500)
-          continue
-        }
+      const servers = sources.servers || []
+      if (!servers.length) return { status: 'skip' }
 
-        // Fetch movie sources
-        const sources = await fetchMovieSources(cinemmId)
-
-        if (!sources.ok || sources.access !== 'direct') {
-          skipped++
-          processed++
-          await sleep(DELAY_MS)
-          continue
-        }
-
-        const servers = sources.servers || []
-        if (servers.length === 0) {
-          skipped++
-          processed++
-          await sleep(DELAY_MS)
-          continue
-        }
-
-        // Resolve shortlinks and collect stream URLs
-        const streamUrls = []
-        for (const server of servers) {
+      // Resolve shortlinks IN PARALLEL (big speedup!)
+      const resolveResults = await Promise.all(
+        servers.map(async (server) => {
           const playUrl = server.playUrl || server.url
-          if (!playUrl) continue
-
-          // Resolve cinemm.com shortlink
+          if (!playUrl) return null
           const streamUrl = await resolveShortlink(playUrl)
-          if (!streamUrl || !streamUrl.startsWith('http')) continue
-
-          streamUrls.push({
-            streamUrl,
-            shortlink: playUrl,
+          if (!streamUrl?.startsWith('http')) return null
+          return {
+            streamUrl, shortlink: playUrl,
             quality: parseQuality(streamUrl),
             format: parseFormat(streamUrl),
             host: parseHost(streamUrl),
             fileName: parseFileName(streamUrl),
-            fileSize: 'N/A', // will fetch later
-          })
-        }
+            fileSize: 'N/A',
+          }
+        })
+      )
+      const streamUrls = resolveResults.filter(Boolean)
+      if (!streamUrls.length) return { status: 'skip' }
 
-        if (streamUrls.length === 0) {
-          skipped++
-          processed++
-          await sleep(DELAY_MS)
-          continue
-        }
-
-        // Fetch file sizes in parallel
+      // File sizes (optional)
+      if (!skipFileSize) {
         await Promise.all(streamUrls.map(async (u) => {
           u.fileSize = await fetchFileSize(u.streamUrl)
         }))
-
-        if (!dryRun) {
-          // Batch insert
-          const farFuture = '9999-12-31T23:59:59.000Z'
-          const valuePlaceholders = []
-          const params = []
-          let paramIdx = 1
-
-          for (const u of streamUrls) {
-            valuePlaceholders.push(
-              `(gen_random_uuid()::text, $${paramIdx}, $${paramIdx+1}, NULL, $${paramIdx+2}, $${paramIdx+3}, $${paramIdx+4}, $${paramIdx+5}, $${paramIdx+6}, $${paramIdx+7}, $${paramIdx+8}, NOW(), $${paramIdx+9})`
-            )
-            params.push(
-              String(cinemmId), type,
-              u.shortlink, u.streamUrl,
-              u.quality, u.format, u.host,
-              u.fileName, u.fileSize, farFuture,
-            )
-            paramIdx += 10
-          }
-
-          const sql = `INSERT INTO "ManualStreamUrl" ("id","mediaId","mediaType","episodeId","shortlink","streamUrl","quality","format","host","fileName","fileSize","createdAt","expiresAt") VALUES ${valuePlaceholders.join(', ')} ON CONFLICT DO NOTHING`
-          const result = await client.query(sql, params)
-          totalUrlsStored += result.rowCount || 0
-        } else {
-          totalUrlsStored += streamUrls.length
-        }
-
-        processed++
-        console.log(`\r   [${processed}/${limit}] ✅ ${item.name} → ${streamUrls.length} URLs stored`)
       }
-    } catch (e) {
-      failed++
-      console.log(`\r   [${processed + 1}/${limit}] ❌ ${item.name}: ${e.message}`)
-      processed++
-    }
 
-    await sleep(DELAY_MS)
+      // Insert
+      if (!dryRun) {
+        const farFuture = '9999-12-31T23:59:59.000Z'
+        const placeholders = []
+        const params = []
+        let pi = 1
+        for (const u of streamUrls) {
+          placeholders.push(
+            `(gen_random_uuid()::text,$${pi},$${pi+1},NULL,$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6},$${pi+7},$${pi+8},NOW(),$${pi+9})`
+          )
+          params.push(String(cinemmId), type, u.shortlink, u.streamUrl,
+            u.quality, u.format, u.host, u.fileName, u.fileSize, farFuture)
+          pi += 10
+        }
+        const sql = `INSERT INTO "ManualStreamUrl"("id","mediaId","mediaType","episodeId","shortlink","streamUrl","quality","format","host","fileName","fileSize","createdAt","expiresAt") VALUES ${placeholders.join(',')} ON CONFLICT DO NOTHING`
+        const result = await client.query(sql, params)
+        return { status: 'ok', urls: result.rowCount || 0, name: item.name }
+      }
+      return { status: 'ok', urls: streamUrls.length, name: item.name }
+    } catch (e) {
+      return { status: 'error', error: e.message, name: item.name }
+    }
   }
+
+  // ---------- Concurrent workers ----------
+  console.log(`🚀 Processing ${items.length} ${type}(s) with ${CONCURRENCY} workers...\n`)
+
+  async function worker(wid) {
+    while (true) {
+      const i = nextIndex++
+      if (i >= items.length) return
+      const item = items[i]
+      const r = await processOneMovie(item)
+      processed++
+      if (r.status === 'ok') {
+        totalUrlsStored += r.urls
+        console.log(`   [${processed}/${items.length}] ✅ ${item.name} → ${r.urls} URLs (w${wid})`)
+      } else if (r.status === 'skip') {
+        skipped++
+      } else {
+        failed++
+        if (failed <= 10) console.log(`   [${processed}/${items.length}] ❌ ${item.name}: ${r.error}`)
+      }
+      await sleep(DELAY_MS / CONCURRENCY)
+    }
+  }
+
+  const workers = []
+  for (let w = 1; w <= CONCURRENCY; w++) workers.push(worker(w))
+  await Promise.all(workers)
 
   // Summary
   console.log('\n═══════════════════════════════════════════════════════')
@@ -357,15 +315,10 @@ async function main() {
   console.log(`  ✅ URLs stored:  ${totalUrlsStored}`)
   console.log(`  ⏭️ Skipped:      ${skipped}`)
   console.log(`  ❌ Failed:       ${failed}`)
-
-  const finalCount = await client.query(`SELECT COUNT(*)::int as count FROM "ManualStreamUrl" WHERE "expiresAt" > NOW()`)
-  console.log(`\n  Total URLs in database: ${finalCount.rows[0].count.toLocaleString()}`)
+  const fc = await client.query(`SELECT COUNT(*)::int c FROM "ManualStreamUrl" WHERE "expiresAt">NOW()`)
+  console.log(`\n  Total URLs: ${fc.rows[0].c.toLocaleString()}`)
   console.log('\n═══════════════════════════════════════════════════════')
-
   await client.end()
 }
 
-main().catch((e) => {
-  console.error('❌ FATAL:', e.message)
-  process.exit(1)
-})
+main().catch(e => { console.error('❌ FATAL:', e.message); process.exit(1) })
